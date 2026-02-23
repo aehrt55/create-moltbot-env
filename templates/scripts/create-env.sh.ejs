@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(dirname "$SCRIPT_DIR")"
+ENV_NAME="${1:?Usage: create-env.sh <env-name>}"
+OVERLAY_DIR="$ROOT_DIR/overlays/$ENV_NAME"
+
+CF_ACCOUNT_ID="<%= cfAccountId %>"
+CF_ACCESS_TEAM_DOMAIN="<%= cfAccessTeamDomain %>"
+MANAGER_AGE_KEY="<%= managerAgeKey %>"
+APP_REPO="<%= appRepo %>"
+WORKER_DOMAIN="moltbot-${ENV_NAME}.<%= workersSubdomain %>.workers.dev"
+
+# --- Validation ---
+
+if [[ -d "$OVERLAY_DIR" ]]; then
+  echo "Error: overlay directory already exists: $OVERLAY_DIR" >&2
+  exit 1
+fi
+
+for cmd in npx jq sops age curl; do
+  if ! command -v "$cmd" &>/dev/null; then
+    echo "Error: required tool not found: $cmd" >&2
+    exit 1
+  fi
+done
+
+echo "▶ Checking wrangler auth..."
+if ! npx wrangler whoami &>/dev/null; then
+  echo "Error: wrangler is not logged in. Run 'npx wrangler login' first." >&2
+  exit 1
+fi
+
+if [[ -z "${CF_ACCESS_API_TOKEN:-}" ]]; then
+  echo "Error: CF_ACCESS_API_TOKEN environment variable is required (for Cloudflare Access API)." >&2
+  echo "  See docs/cf-api-token.md for how to create one." >&2
+  exit 1
+fi
+
+# Unset wrangler-recognized token vars so wrangler uses its own login session
+unset CF_API_TOKEN CLOUDFLARE_API_TOKEN
+
+# --- R2 Bucket ---
+
+BUCKET_NAME="moltbot-${ENV_NAME}-data"
+echo "▶ Creating R2 bucket: $BUCKET_NAME"
+npx wrangler r2 bucket create "$BUCKET_NAME"
+
+# --- CF Access App ---
+
+MAIN_APP_NAME="moltbot-${ENV_NAME} - Cloudflare Workers"
+echo "▶ Creating Cloudflare Access app: $MAIN_APP_NAME"
+APP_RESPONSE=$(curl -s -X POST \
+  "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/access/apps" \
+  -H "Authorization: Bearer $CF_ACCESS_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"name\": \"${MAIN_APP_NAME}\",
+    \"type\": \"self_hosted\",
+    \"domain\": \"${WORKER_DOMAIN}\",
+    \"session_duration\": \"24h\"
+  }")
+
+if [[ "$(echo "$APP_RESPONSE" | jq -r '.success')" != "true" ]]; then
+  echo "Error: Failed to create Access app:" >&2
+  echo "$APP_RESPONSE" | jq . >&2
+  exit 1
+fi
+
+CF_ACCESS_AUD=$(echo "$APP_RESPONSE" | jq -r '.result.aud')
+APP_ID=$(echo "$APP_RESPONSE" | jq -r '.result.id')
+echo "  AUD: $CF_ACCESS_AUD"
+
+echo "▶ Creating Access policy: Allow owner"
+POLICY_RESPONSE=$(curl -s -X POST \
+  "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/access/apps/$APP_ID/policies" \
+  -H "Authorization: Bearer $CF_ACCESS_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Allow owner",
+    "decision": "allow",
+    "include": [{"email": {"email": "<%= accessPolicyEmail %>"}}]
+  }')
+
+if [[ "$(echo "$POLICY_RESPONSE" | jq -r '.success')" != "true" ]]; then
+  echo "Error: Failed to create Access policy:" >&2
+  echo "$POLICY_RESPONSE" | jq . >&2
+  exit 1
+fi
+
+# --- Overlay Directory ---
+
+echo "▶ Creating overlay directory: overlays/$ENV_NAME"
+mkdir -p "$OVERLAY_DIR"
+
+# wrangler.jsonc — use printf to avoid trailing newline issues
+DEFAULT_MODEL="${DEFAULT_MODEL:-google/gemini-3-flash-preview}"
+
+# Write as jsonc with comment header and trailing commas (match existing style)
+{
+  echo "{"
+  echo "  // Environment: ${ENV_NAME}"
+  echo "  \"name\": \"moltbot-${ENV_NAME}\","
+  echo "  \"workers_dev\": true,"
+  echo "  \"r2_buckets\": ["
+  echo "    {"
+  echo "      \"binding\": \"MOLTBOT_BUCKET\","
+  echo "      \"bucket_name\": \"${BUCKET_NAME}\","
+  echo "      \"preview_bucket_name\": \"${BUCKET_NAME}\","
+  echo "    },"
+  echo "  ],"
+  echo "  \"vars\": {"
+  echo "    \"SANDBOX_SLEEP_AFTER\": \"10m\","
+  echo "    \"DEBUG_ROUTES\": \"true\","
+  echo "    \"CF_ACCESS_TEAM_DOMAIN\": \"${CF_ACCESS_TEAM_DOMAIN}\","
+  echo "    \"CF_ACCOUNT_ID\": \"${CF_ACCOUNT_ID}\","
+  echo "    \"CF_ACCESS_AUD\": \"${CF_ACCESS_AUD}\","
+  echo "    \"R2_BUCKET_NAME\": \"${BUCKET_NAME}\","
+  echo "    \"DEFAULT_MODEL\": \"${DEFAULT_MODEL}\","
+  echo "    \"WORKER_URL\": \"https://${WORKER_DOMAIN}\","
+  if [[ -n "${BEDROCK_DEFAULT_MODEL:-}" ]]; then
+    echo "    \"BEDROCK_DEFAULT_MODEL\": \"${BEDROCK_DEFAULT_MODEL}\","
+  fi
+  if [[ "${SUBSCRIPTION_AUTH:-}" == "true" ]]; then
+    echo "    \"SUBSCRIPTION_AUTH\": \"true\","
+  fi
+  echo "  },"
+  echo "}"
+} > "$OVERLAY_DIR/wrangler.jsonc"
+
+# version.txt — latest main SHA from app repo
+echo "▶ Fetching latest app version..."
+LATEST_SHA=$(git ls-remote "$APP_REPO" refs/heads/main | cut -c1-7)
+echo "$LATEST_SHA" > "$OVERLAY_DIR/version.txt"
+echo "  Version: $LATEST_SHA"
+
+# Makefile symlink
+ln -s ../../Makefile "$OVERLAY_DIR/Makefile"
+
+# --- .sops.yaml ---
+
+echo "▶ Updating .sops.yaml"
+SOPS_FILE="$ROOT_DIR/.sops.yaml"
+
+# Find the last creation_rule entry and append after it (before the trailing comments)
+if grep -q "path_regex: overlays/${ENV_NAME}/secrets" "$SOPS_FILE" 2>/dev/null; then
+  echo "  .sops.yaml rule for $ENV_NAME already exists, skipping"
+else
+  SOPS_TMP=$(mktemp)
+  awk -v env="$ENV_NAME" -v key="$MANAGER_AGE_KEY" '
+    /^# Per-env key generation steps/ {
+      print "  - path_regex: overlays/" env "/secrets\\.json$"
+      print "    age: >-"
+      print "      " key
+      print "    # manager"
+      print "    # TODO: add " env " env key when CI/CD is set up"
+      print ""
+    }
+    { print }
+  ' "$SOPS_FILE" > "$SOPS_TMP"
+  mv "$SOPS_TMP" "$SOPS_FILE"
+fi
+
+# --- Summary ---
+
+echo ""
+echo "✅ Environment '$ENV_NAME' created successfully!"
+echo ""
+echo "  R2 bucket:    $BUCKET_NAME"
+echo "  CF Access AUD: $CF_ACCESS_AUD"
+echo "  Worker domain: $WORKER_DOMAIN"
+echo "  Overlay dir:   overlays/$ENV_NAME/"
+echo "  App version:   $LATEST_SHA"
+echo ""
+echo "Next steps:"
+echo "  1. Create R2 API Token at: https://dash.cloudflare.com/${CF_ACCOUNT_ID}/r2/api-tokens"
+echo "  2. Create secrets.json with sops"
+echo "  3. Deploy: cd overlays/$ENV_NAME && make deploy"

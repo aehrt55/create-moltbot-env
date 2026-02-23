@@ -1,0 +1,15 @@
+creation_rules: []
+
+# Per-env key generation steps (run once per env when setting up CI/CD):
+#
+# 1. age-keygen
+#    → save private key (AGE-SECRET-KEY-1...) as CI/CD secret for that env
+#    → copy public key (age1...)
+#
+# 2. Add the env public key to the corresponding rule above:
+#    age: >-
+#      <env-public-key>,
+#      <%= managerAgeKey %>
+#
+# 3. Re-encrypt existing secrets to include the new recipient:
+#    cd overlays/<env> && sops updatekeys secrets.json

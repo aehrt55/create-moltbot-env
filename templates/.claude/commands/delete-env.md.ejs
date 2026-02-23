@@ -1,0 +1,73 @@
+# Delete Moltbot Environment
+
+You are deleting a moltbot environment. This is a destructive operation. Follow these phases exactly.
+
+## Phase 1 — Select Environment
+
+1. List existing overlay directories by running:
+   ```bash
+   ls -d overlays/*/
+   ```
+
+2. Use AskUserQuestion to ask "Which environment do you want to delete?" with the overlay names as options.
+
+3. Parse the selected environment's `wrangler.jsonc` to extract the worker name and R2 bucket name:
+   ```bash
+   node scripts/jsonc-strip.js overlays/<env-name>/wrangler.jsonc | jq '{name, bucket: .r2_buckets[0].bucket_name}'
+   ```
+
+4. Show the user what will be destroyed:
+   > **⚠️ The following resources will be permanently deleted:**
+   >
+   > - Cloudflare Worker: `<worker-name>`
+   > - Cloudflare Access app: `moltbot-<env-name>`
+   > - R2 bucket: `<bucket-name>`
+   > - Overlay directory: `overlays/<env-name>/`
+   > - `.sops.yaml` rule for this environment
+
+5. Use AskUserQuestion to confirm: "Are you sure you want to delete this environment? This is irreversible." with options:
+   - Yes, delete everything
+   - No, cancel
+
+   If the user cancels, stop immediately.
+
+## Phase 1.5 — Export Secrets
+
+If `overlays/<env-name>/secrets.json` exists, use AskUserQuestion to ask: "Export a plaintext copy of secrets before deletion?" with options:
+- Yes — save to `_<env-name>.secrets.json`
+- No
+
+If yes:
+```bash
+sops decrypt overlays/<env-name>/secrets.json > _<env-name>.secrets.json
+```
+Tell the user: "Plaintext secrets saved to `_<env-name>.secrets.json`. This file is in `.gitignore` and won't be committed. Delete it when you no longer need it."
+
+## Phase 2 — Delete Infrastructure
+
+The script requires `CF_ACCESS_API_TOKEN`. Use AskUserQuestion to ask how to provide it:
+- "Read from macOS Keychain (Recommended)" — run `security find-generic-password -a "cf-access-api-token" -s "cf-access-api-token" -w 2>/dev/null` to get the token. If empty, tell the user to store it first (see `docs/cf-api-token.md`) and stop.
+- "Paste manually" — use AskUserQuestion to ask the user to paste their CF_ACCESS_API_TOKEN.
+
+Then run the delete-env script:
+```bash
+CF_ACCESS_API_TOKEN="<token>" bash scripts/delete-env.sh <env-name>
+```
+
+Show the user the results.
+
+## Phase 3 — Manual Cleanup Reminders
+
+Tell the user:
+
+> **Manual cleanup needed:**
+>
+> 1. **Delete R2 API Token** — Go to https://dash.cloudflare.com/<%= cfAccountId %>/r2/api-tokens and delete the token for this environment's bucket.
+> 2. **Remove CI/CD secrets** — If CI/CD was set up for this environment, remove the env-specific AGE private key and any other secrets from your CI/CD provider.
+
+## Important Notes
+
+- The script deletes: Worker, CF Access app + policies, R2 bucket, overlay directory, and .sops.yaml rule
+- R2 bucket deletion will fail if the bucket is non-empty — the script will show instructions for emptying it
+- Non-critical failures (e.g., resource already deleted) are logged as warnings but don't stop the script
+- After deletion, remember to commit the changes to `.sops.yaml` and the removed overlay directory

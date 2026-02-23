@@ -1,0 +1,37 @@
+{
+  "name": "@aehrt55/create-moltbot-env",
+  "version": "0.1.0",
+  "description": "Scaffold a moltbot-env GitOps repository for deploying OpenClaw on Cloudflare Workers",
+  "type": "module",
+  "bin": "dist/index.js",
+  "files": [
+    "dist",
+    "templates",
+    "migrations"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts src/diff.ts --format esm",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "moltbot",
+    "openclaw",
+    "cloudflare-workers",
+    "scaffold",
+    "cli"
+  ],
+  "author": "aehrt55",
+  "license": "MIT",
+  "dependencies": {
+    "chalk": "^5.4.1",
+    "ejs": "^3.1.10",
+    "prompts": "^2.4.2"
+  },
+  "devDependencies": {
+    "@types/ejs": "^3.1.5",
+    "@types/node": "^22.13.4",
+    "@types/prompts": "^2.4.9",
+    "tsup": "^8.4.0",
+    "typescript": "^5.7.3"
+  }
+}

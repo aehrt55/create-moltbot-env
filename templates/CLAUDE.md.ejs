@@ -1,0 +1,54 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project Overview
+
+moltbot-env is a GitOps environment configuration repository for [moltbot-app](<%= appRepo.replace('git@github.com:', 'https://github.com/').replace(/\.git$/, '') %>), a Cloudflare Workers application. It manages per-environment deployment configs using an overlay pattern — each overlay stores its complete `vars` block plus environment-specific config overrides, merged with the app repo's base `wrangler.jsonc` at deploy time.
+
+## Architecture
+
+**Overlay pattern with Make orchestration:**
+- `Makefile` — shared make targets (deploy, secret, wrangler, merged-config, edit-secrets, push-secrets); derives `ROOT` via `realpath` on the symlink
+- `overlays/<env>/Makefile` — symlink to `../../Makefile`; `$(CURDIR)` resolves to the overlay directory so `ENV_NAME` is auto-derived
+- `overlays/<env>/wrangler.jsonc` — environment-specific Wrangler config overrides (JSONC format with comments)
+- `overlays/<env>/version.txt` — pinned moltbot-app commit SHA to deploy
+- `overlays/<env>/secrets.json` — SOPS-encrypted secrets (AGE encryption), committed to git
+- `.sops.yaml` — path-based creation rules mapping each overlay to its AGE recipients (env key + manager key(s))
+
+**Config merging:** At deploy time, the app repo's base `wrangler.jsonc` is merged with the overlay's `wrangler.jsonc` via `jq -s '.[0] * .[1]'` (recursive object merge, arrays are replaced not appended). Intermediate JSONC→JSON conversion uses process substitution — no temporary files. The `secret` and `wrangler` targets use `mktemp` for the one unavoidable temp file (`wrangler --config` requires a file path).
+
+**Deploy flow** (`scripts/deploy.sh`): clone moltbot-app at pinned SHA → `npm ci` → merge configs via process substitution → `npx wrangler deploy` → conditionally push SOPS-encrypted secrets via `wrangler secret bulk`. All work happens in a temp directory cleaned up via `trap` on exit.
+
+**Secret management:** Per-environment secrets are stored as SOPS-encrypted JSON (`overlays/<env>/secrets.json`) using AGE encryption. Each `secrets.json` is encrypted to multiple recipients — the env's own AGE key + all manager keys. SOPS reads the private key from the `SOPS_AGE_KEY` environment variable.
+
+**Makefile requires bash** (`SHELL := /bin/bash`) for process substitution (`<(...)`) support.
+
+## Commands
+
+All commands run from an overlay directory (e.g., `cd overlays/<env-name>`):
+
+```bash
+make deploy                              # Full deploy pipeline (code + secrets)
+make secret KEY=ANTHROPIC_API_KEY        # Set a Wrangler secret interactively
+make wrangler CMD='secret list'          # Run arbitrary wrangler command
+make wrangler CMD='tail'                 # Stream live logs
+make merged-config APP_DIR=/path/to/app  # Inspect final merged config (needs local app repo)
+make sync-access                         # Sync CF Access apps (webhook bypass, requires CF_ACCESS_API_TOKEN)
+make edit-secrets                        # Edit secrets via SOPS (requires SOPS_AGE_KEY)
+make push-secrets                        # Decrypt and bulk-push secrets to Cloudflare
+```
+
+## Updating App Version
+
+Edit `overlays/<env>/version.txt` with the target moltbot-app commit SHA, then deploy.
+
+## Key Scripts
+
+- `scripts/jsonc-strip.js` — minimal JSONC-to-JSON converter (handles `//`, `/* */`, trailing commas)
+- `scripts/deploy.sh` — orchestrates clone, merge, deploy, and conditional secret push with `set -euo pipefail`
+- `scripts/sync-access.sh` — reconciles Cloudflare Access Applications: checks current state, creates/deletes webhook bypass app as needed (requires `CF_ACCESS_API_TOKEN`)
+
+## External Dependencies
+
+Requires `node`, `jq`, `git`, `sops`, `age` (`age-keygen`), and `npx wrangler` available on PATH. The app repo is `<%= appRepo %>`.
