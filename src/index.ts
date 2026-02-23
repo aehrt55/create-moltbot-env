@@ -243,7 +243,11 @@ function scaffold(targetDir: string, vars: TemplateVars) {
   walkDir(TEMPLATES_DIR, (templatePath) => {
     const relativePath = path.relative(TEMPLATES_DIR, templatePath);
     const isEjs = templatePath.endsWith(".ejs");
-    const outputRelative = isEjs ? relativePath.replace(/\.ejs$/, "") : relativePath;
+    let outputRelative = isEjs ? relativePath.replace(/\.ejs$/, "") : relativePath;
+    // npm strips .gitignore from packages, so we ship it as "gitignore" and rename here
+    if (path.basename(outputRelative) === "gitignore") {
+      outputRelative = path.join(path.dirname(outputRelative), ".gitignore");
+    }
     const outputPath = path.join(targetDir, outputRelative);
 
     fs.mkdirSync(path.dirname(outputPath), { recursive: true });
