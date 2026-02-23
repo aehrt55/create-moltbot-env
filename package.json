@@ -3,7 +3,9 @@
   "version": "0.1.0",
   "description": "Scaffold a moltbot-env GitOps repository for deploying OpenClaw on Cloudflare Workers",
   "type": "module",
-  "bin": "dist/index.js",
+  "bin": {
+    "create-moltbot-env": "dist/index.js"
+  },
   "files": [
     "dist",
     "templates",
