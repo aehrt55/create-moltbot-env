@@ -1,5 +1,7 @@
 # Create New Moltbot Environment
 
+Read `.moltbot-env.json` for config values. Use `<envRepo>` as a placeholder for the env repo slug (read from `.moltbot-env.json` → `envRepo` field) in all `gh` CLI calls. Use `<cfAccountId>` and `<workersSubdomain>` from the config for URLs and domains.
+
 You are creating a new moltbot environment. Follow these phases exactly.
 
 ## Phase 1 — Collect Information
@@ -35,26 +37,67 @@ Save the auth mode choice for later phases. Define:
 
 ## Phase 2 — Create Infrastructure
 
-The script requires `CF_ACCESS_API_TOKEN`. Use AskUserQuestion to ask how to provide it:
-- "Read from macOS Keychain (Recommended)" — run `security find-generic-password -a "cf-access-api-token" -s "cf-access-api-token" -w 2>/dev/null` to get the token. If empty, tell the user to store it first (see `docs/cf-api-token.md`) and stop.
+The script auto-loads `CF_ACCESS_API_TOKEN` from the credentials config in `.moltbot-env.json`. If that fails, use AskUserQuestion to ask how to provide it:
 - "Paste manually" — use AskUserQuestion to ask the user to paste their CF_ACCESS_API_TOKEN.
 
-Then run the create-env script, passing `CF_ACCESS_API_TOKEN` inline:
+Then run the create-env script:
    ```bash
-   CF_ACCESS_API_TOKEN="<token>" DEFAULT_MODEL="<chosen-model>" BEDROCK_DEFAULT_MODEL="<chosen-bedrock-or-empty>" SUBSCRIPTION_AUTH="<true-or-empty>" bash scripts/create-env.sh <env-name>
+   CF_ACCESS_API_TOKEN="<token-if-manual>" DEFAULT_MODEL="<chosen-model>" BEDROCK_DEFAULT_MODEL="<chosen-bedrock-or-empty>" SUBSCRIPTION_AUTH="<true-or-empty>" bash scripts/create-env.sh <env-name>
    ```
    - If BEDROCK_DEFAULT_MODEL is "No" or empty, omit it entirely.
    - If `is_subscription` is true, set `SUBSCRIPTION_AUTH=true`. Otherwise omit it.
 
 3. Show the user the results (R2 bucket, CF Access AUD, overlay directory).
 
+4. Capture `ENV_AGE_PUBLIC_KEY` and `ENV_AGE_PRIVATE_KEY` from the script output. Show:
+
+   > **Public key** (saved to `.sops.yaml`): `<ENV_AGE_PUBLIC_KEY>`
+   > **Private key**: `<ENV_AGE_PRIVATE_KEY>`
+
+5. Use AskUserQuestion: "Configure GitHub Actions environment and branch protection now?" with options:
+   - Yes, set it up via `gh` CLI (Recommended)
+   - No, I'll set it up manually later
+
+   **If yes**, run the following steps in order:
+
+   a. Create GitHub environment with deployment branch policy:
+      ```bash
+      gh api --method PUT /repos/<envRepo>/environments/<env-name> \
+        --input - <<< '{"deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}'
+      ```
+
+   b. Add allowed deployment branches (main + env branch):
+      ```bash
+      gh api --method POST /repos/<envRepo>/environments/<env-name>/deployment-branch-policies \
+        -f name=main -f type=branch 2>/dev/null || true
+      gh api --method POST /repos/<envRepo>/environments/<env-name>/deployment-branch-policies \
+        -f name=<env-name> -f type=branch 2>/dev/null || true
+      ```
+
+   c. Set SOPS_AGE_KEY secret:
+      ```bash
+      gh secret set SOPS_AGE_KEY --env <env-name> --body "<ENV_AGE_PRIVATE_KEY>" -R <envRepo>
+      ```
+
+   d. Add env branch to "Environment branches" ruleset (skip with warning if ruleset doesn't exist or requires Pro):
+      ```bash
+      ruleset_id=$(gh api /repos/<envRepo>/rulesets --jq '.[] | select(.name == "Environment branches") | .id' 2>/dev/null)
+      ```
+      If ruleset exists, fetch current include list, append `refs/heads/<env-name>`, and update. If not, warn:
+      > Branch protection ruleset not available. Deployment branch policy still protects secret access.
+
+   Tell the user: "GitHub environment `<env-name>` configured: SOPS_AGE_KEY set, deployment branches restricted to `main` + `<env-name>`."
+
+   **If no**, show:
+   > To set up later, run `/setup-env-age-key` or manually go to **Settings → Environments → `<env-name>`** and add secret `SOPS_AGE_KEY`.
+
 ## Phase 3 — R2 Access Key (Manual Step)
 
-Tell the user:
+Read `cfAccountId` from `.moltbot-env.json` and tell the user:
 
 > You need to create an R2 API Token manually from the Cloudflare dashboard:
 >
-> 1. Go to https://dash.cloudflare.com/<%= cfAccountId %>/r2/api-tokens
+> 1. Go to https://dash.cloudflare.com/<cfAccountId>/r2/api-tokens
 > 2. Click "Create API Token"
 > 3. Select the `moltbot-<env-name>-data` bucket
 > 4. Grant "Object Read & Write" permission
@@ -114,10 +157,10 @@ To deploy later:
   cd overlays/<env-name> && make deploy
 ```
 
-After deployment (or showing the deploy-later command), display the following links:
+After deployment (or showing the deploy-later command), read `workersSubdomain` from `.moltbot-env.json` and display:
 
-> **Chat:** `https://moltbot-<env-name>.<%= workersSubdomain %>.workers.dev/?token=<MOLTBOT_GATEWAY_TOKEN>`
-> **Admin:** `https://moltbot-<env-name>.<%= workersSubdomain %>.workers.dev/_admin`
+> **Chat:** `https://moltbot-<env-name>.<workersSubdomain>.workers.dev/?token=<MOLTBOT_GATEWAY_TOKEN>`
+> **Admin:** `https://moltbot-<env-name>.<workersSubdomain>.workers.dev/_admin`
 
 Use the actual `MOLTBOT_GATEWAY_TOKEN` value generated in Phase 4.
 
@@ -126,5 +169,5 @@ Use the actual `MOLTBOT_GATEWAY_TOKEN` value generated in Phase 4.
 - The script creates: R2 bucket, CF Access app + policy, overlay directory (wrangler.jsonc, version.txt, Makefile symlink), and updates .sops.yaml
 - R2 API Tokens cannot be created via CLI — the user must create them manually from the CF dashboard
 - `SOPS_AGE_KEY` must be set for sops encryption to work
-- After deployment, the worker will be available at `moltbot-<env-name>.<%= workersSubdomain %>.workers.dev`
+- After deployment, the worker will be available at `moltbot-<env-name>.<workersSubdomain>.workers.dev`
 - When `SUBSCRIPTION_AUTH=true`, the worker starts without API keys. Users authenticate via `/claude_auth` or `/openai_auth` commands in the chat.

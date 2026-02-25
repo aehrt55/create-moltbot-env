@@ -1,0 +1,152 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+    paths: [overlays/**]
+
+  workflow_dispatch:
+    inputs:
+      envs:
+        description: 'Environments to deploy (comma-separated, "all", or empty to auto-detect from branch name)'
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      envs: ${{ steps.changes.outputs.envs }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: changes
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_ENVS: ${{ inputs.envs }}
+          BRANCH: ${{ github.ref_name }}
+          EVENT_BEFORE: ${{ github.event.before }}
+          EVENT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          # workflow_dispatch: explicit input > branch name auto-detect > all
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            if [[ -n "$INPUT_ENVS" && "$INPUT_ENVS" != "all" ]]; then
+              envs=$(echo "$INPUT_ENVS" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | jq -Rnc '[inputs | select(length > 0)]')
+            elif [[ -z "$INPUT_ENVS" && "$BRANCH" != "main" ]]; then
+              if [[ -d "overlays/$BRANCH" ]]; then
+                envs=$(echo "$BRANCH" | jq -Rnc '[inputs]')
+              else
+                echo "::error::Branch '$BRANCH' does not match any overlay. Specify envs explicitly."
+                exit 1
+              fi
+            else
+              envs=$(ls -1d overlays/*/ 2>/dev/null | xargs -n1 basename | jq -Rnc '[inputs | select(length > 0)]')
+            fi
+          else
+            # Push event: use event payload SHAs for accurate diff
+            ZERO_SHA="0000000000000000000000000000000000000000"
+            if [[ "$EVENT_BEFORE" == "$ZERO_SHA" ]]; then
+              echo "Initial/force push detected, deploying all envs"
+              envs=$(ls -1d overlays/*/ 2>/dev/null | xargs -n1 basename | jq -Rnc '[inputs | select(length > 0)]')
+            else
+              envs=$(git diff --name-only "${EVENT_BEFORE}..${EVENT_SHA}" -- overlays/ \
+                | cut -d/ -f2 | sort -u | jq -Rnc '[inputs | select(length > 0)]')
+            fi
+          fi
+
+          # Filter out deleted overlays (git diff may include removed dirs)
+          validated="[]"
+          for e in $(echo "$envs" | jq -r '.[]'); do
+            if [[ -d "overlays/$e" ]]; then
+              validated=$(echo "$validated" | jq -c --arg e "$e" '. + [$e]')
+            else
+              echo "Skipping '$e' (overlay directory not found, likely deleted)"
+            fi
+          done
+          envs="$validated"
+
+          echo "envs=$envs" >> "$GITHUB_OUTPUT"
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            echo "Manual deploy (branch=$BRANCH): $envs"
+          else
+            echo "Changed envs: $envs"
+          fi
+
+  deploy:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.envs != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        env: ${{ fromJson(needs.detect-changes.outputs.envs) }}
+      fail-fast: false
+    name: deploy (${{ matrix.env }})
+    environment: ${{ matrix.env }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read app repo from config
+        id: config
+        run: |
+          APP_REPO_SLUG=$(jq -r '.appRepo' .moltbot-env.json)
+          echo "app_repo=https://github.com/${APP_REPO_SLUG}.git" >> "$GITHUB_OUTPUT"
+          echo "app_repo_name=${APP_REPO_SLUG#*/}" >> "$GITHUB_OUTPUT"
+
+      # For private app repos: configure APP_REPO_APP_ID (repo variable) and
+      # APP_REPO_APP_PRIVATE_KEY (repo secret) from a GitHub App with read access.
+      # For public app repos: skip these steps by leaving APP_REPO_APP_ID unset.
+      - name: Generate GitHub App token
+        if: vars.APP_REPO_APP_ID != ''
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.APP_REPO_APP_ID }}
+          private-key: ${{ secrets.APP_REPO_APP_PRIVATE_KEY }}
+          repositories: ${{ steps.config.outputs.app_repo_name }}
+
+      - name: Configure git credentials
+        if: steps.app-token.outputs.token != ''
+        env:
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          echo "::add-mask::$APP_TOKEN"
+          git config --global credential.https://github.com.helper \
+            '!f() { echo "username=x-access-token"; echo "password=${APP_TOKEN}"; }; f'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install sops and age
+        run: |
+          # sops
+          SOPS_VERSION=3.9.4
+          SOPS_SHA256=5488e32bc471de7982ad895dd054bbab3ab91c417a118426134551e9626e4e85
+          curl -fsSL "https://github.com/getsops/sops/releases/download/v${SOPS_VERSION}/sops-v${SOPS_VERSION}.linux.amd64" \
+            -o /usr/local/bin/sops
+          echo "$SOPS_SHA256  /usr/local/bin/sops" | sha256sum -c -
+          chmod +x /usr/local/bin/sops
+
+          # age
+          AGE_VERSION=1.2.1
+          AGE_SHA256=7df45a6cc87d4da11cc03a539a7470c15b1041ab2b396af088fe9990f7c79d50
+          AGE_TGZ=$(mktemp)
+          curl -fsSL "https://github.com/FiloSottile/age/releases/download/v${AGE_VERSION}/age-v${AGE_VERSION}-linux-amd64.tar.gz" \
+            -o "$AGE_TGZ"
+          echo "$AGE_SHA256  $AGE_TGZ" | sha256sum -c -
+          tar xz --strip-components=1 -C /usr/local/bin age/age age/age-keygen < "$AGE_TGZ"
+          rm "$AGE_TGZ"
+
+      - name: Deploy ${{ matrix.env }}
+        env:
+          APP_REPO: ${{ steps.config.outputs.app_repo }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}
+          DEPLOY_ENV: ${{ matrix.env }}
+        run: bash scripts/deploy.sh "$DEPLOY_ENV"

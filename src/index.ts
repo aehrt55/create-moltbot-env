@@ -12,11 +12,12 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TEMPLATES_DIR = path.resolve(__dirname, "..", "templates");
 
 interface TemplateVars {
+  appRepo: string;
+  envRepo: string;
   cfAccountId: string;
   workersSubdomain: string;
   cfAccessTeamDomain: string;
   accessPolicyEmail: string;
-  appRepo: string;
   managerAgeKey: string;
   version: string;
   createdAt: string;
@@ -101,8 +102,25 @@ async function main() {
       {
         type: "text",
         name: "appRepo",
-        message: "App repo git URL",
-        initial: "git@github.com:aehrt55/moltbot-app.git",
+        message: "App repo (owner/repo slug)",
+        initial: "aehrt55/moltbot-app",
+        validate: (v: string) =>
+          /^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(v)
+            ? true
+            : 'Must be owner/repo format (e.g. "aehrt55/moltbot-app")',
+      },
+      {
+        type: "text",
+        name: "envRepo",
+        message: "Env repo (owner/repo slug)",
+        initial: (_: unknown, values: Record<string, string>) => {
+          const owner = values.appRepo?.split("/")[0] ?? "owner";
+          return `${owner}/moltbot-env`;
+        },
+        validate: (v: string) =>
+          /^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(v)
+            ? true
+            : 'Must be owner/repo format (e.g. "aehrt55/moltbot-env")',
       },
       {
         type: "confirm",
@@ -189,11 +207,12 @@ async function main() {
   }
 
   const vars: TemplateVars = {
+    appRepo: response.appRepo,
+    envRepo: response.envRepo,
     cfAccountId: response.cfAccountId,
     workersSubdomain: response.workersSubdomain,
     cfAccessTeamDomain: response.cfAccessTeamDomain,
     accessPolicyEmail: response.accessPolicyEmail,
-    appRepo: response.appRepo,
     managerAgeKey,
     version: getCliVersion(),
     createdAt: new Date().toISOString().slice(0, 10),

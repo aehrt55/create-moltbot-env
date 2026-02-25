@@ -9,7 +9,7 @@ creation_rules: []
 # 2. Add the env public key to the corresponding rule above:
 #    age: >-
 #      <env-public-key>,
-#      <%= managerAgeKey %>
+#      <manager-age-key> (see .moltbot-env.json)
 #
 # 3. Re-encrypt existing secrets to include the new recipient:
 #    cd overlays/<env> && sops updatekeys secrets.json

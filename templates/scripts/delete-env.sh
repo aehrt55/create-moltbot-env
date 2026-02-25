@@ -6,7 +6,22 @@ ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 ENV_NAME="${1:?Usage: delete-env.sh <env-name>}"
 OVERLAY_DIR="$ROOT_DIR/overlays/$ENV_NAME"
 
-CF_ACCOUNT_ID="<%= cfAccountId %>"
+CONFIG="$ROOT_DIR/.moltbot-env.json"
+[[ -f "$CONFIG" ]] || { echo "Error: .moltbot-env.json not found" >&2; exit 1; }
+
+CF_ACCOUNT_ID=$(jq -re '.cfAccountId // empty' "$CONFIG") || { echo "Error: cfAccountId missing from .moltbot-env.json" >&2; exit 1; }
+
+# --- Credential loading ---
+
+load_credential() {
+  local key="$1" config="$2"
+  local source=$(jq -r --arg k "$key" '.credentials[$k].source' "$config")
+  if [[ "$source" == "keychain" ]] && command -v security &>/dev/null; then
+    local account=$(jq -r --arg k "$key" '.credentials[$k].keychainAccount' "$config")
+    local service=$(jq -r --arg k "$key" '.credentials[$k].keychainService' "$config")
+    security find-generic-password -a "$account" -s "$service" -w 2>/dev/null || true
+  fi
+}
 
 # --- Validation ---
 
@@ -29,14 +44,19 @@ if ! npx wrangler whoami &>/dev/null; then
 fi
 
 if [[ -z "${CF_ACCESS_API_TOKEN:-}" ]]; then
+  CF_ACCESS_API_TOKEN=$(load_credential cfAccessApiToken "$CONFIG")
+  export CF_ACCESS_API_TOKEN
+fi
+
+if [[ -z "${CF_ACCESS_API_TOKEN:-}" ]]; then
   echo "Error: CF_ACCESS_API_TOKEN environment variable is required (for Cloudflare Access API)." >&2
   echo "  See docs/cf-api-token.md for how to create one." >&2
   exit 1
 fi
 
-# Auto-load SOPS_AGE_KEY from macOS Keychain if not already set
-if [[ -z "${SOPS_AGE_KEY:-}" ]] && command -v security &>/dev/null; then
-  SOPS_AGE_KEY=$(security find-generic-password -a "sops-age" -s "sops-age-key" -w 2>/dev/null) || true
+# Auto-load SOPS_AGE_KEY from config credentials if not already set
+if [[ -z "${SOPS_AGE_KEY:-}" ]]; then
+  SOPS_AGE_KEY=$(load_credential sopsAgeKey "$CONFIG")
   export SOPS_AGE_KEY
 fi
 
@@ -55,6 +75,9 @@ echo "  R2 bucket: $BUCKET_NAME"
 echo ""
 
 # --- Delete Cloudflare Worker ---
+# Design Decision: 2>/dev/null on destructive wrangler commands hides all errors (auth, network),
+# not just "not found". A future improvement should capture stderr, distinguish "not found" from
+# real errors, and surface unexpected failures before proceeding with overlay cleanup.
 
 echo "▶ Deleting Cloudflare Worker: $WORKER_NAME"
 if npx wrangler delete --name "$WORKER_NAME" --force 2>/dev/null; then
@@ -67,6 +90,8 @@ fi
 
 CONTAINER_NAME="${WORKER_NAME}-sandbox"
 echo "▶ Deleting container app: $CONTAINER_NAME"
+# Design Decision: 2>/dev/null hides auth/network errors, making failures look like "not found".
+# This is a low-frequency interactive script; improving stderr handling is deferred to a future PR.
 CONTAINER_ID=$(npx wrangler containers list 2>/dev/null | jq -r --arg name "$CONTAINER_NAME" '.[] | select(.name == $name) | .id')
 
 if [[ -n "$CONTAINER_ID" ]]; then
@@ -134,8 +159,9 @@ echo "▶ Deleting R2 bucket: $BUCKET_NAME"
 # Extract R2 credentials from secrets.json to empty the bucket via S3 API
 R2_ENDPOINT="https://${CF_ACCOUNT_ID}.r2.cloudflarestorage.com"
 if [[ -f "$OVERLAY_DIR/secrets.json" ]] && command -v sops &>/dev/null && command -v aws &>/dev/null && [[ -n "${SOPS_AGE_KEY:-}" ]]; then
-  R2_KEY_ID=$(sops decrypt "$OVERLAY_DIR/secrets.json" | jq -r '.R2_ACCESS_KEY_ID // empty')
-  R2_SECRET=$(sops decrypt "$OVERLAY_DIR/secrets.json" | jq -r '.R2_SECRET_ACCESS_KEY // empty')
+  secrets_json=$(sops decrypt "$OVERLAY_DIR/secrets.json" 2>/dev/null) || secrets_json=""
+  R2_KEY_ID=$(echo "$secrets_json" | jq -r '.R2_ACCESS_KEY_ID // empty')
+  R2_SECRET=$(echo "$secrets_json" | jq -r '.R2_SECRET_ACCESS_KEY // empty')
   if [[ -n "$R2_KEY_ID" && -n "$R2_SECRET" ]]; then
     echo "  Emptying bucket via S3 API..."
     AWS_ACCESS_KEY_ID="$R2_KEY_ID" AWS_SECRET_ACCESS_KEY="$R2_SECRET" \
