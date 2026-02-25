@@ -1,6 +1,6 @@
 # moltbot-env
 
-Environment-specific deployment configurations for [moltbot-app](<%= appRepo.replace('git@github.com:', 'https://github.com/').replace(/\.git$/, '') %>).
+Environment-specific deployment configurations for [moltbot-app](https://github.com/<%= appRepo %>).
 
 ## Architecture
 
@@ -29,15 +29,40 @@ make edit-secrets                        # Edit secrets via SOPS (requires SOPS_
 make push-secrets                        # Decrypt and bulk-push secrets to Cloudflare
 ```
 
+## CI/CD
+
+Pushes to `main` that change files in `overlays/` automatically deploy the affected environments via GitHub Actions. Manual deploys are also supported via `workflow_dispatch`. See `.github/workflows/deploy.yml` for details.
+
+### GitHub Secrets Setup
+
+| Secret | Scope | Description |
+|---|---|---|
+| `CLOUDFLARE_API_TOKEN` | Repository | Cloudflare **Account API Token** for deploying Workers |
+| `SOPS_AGE_KEY` | Per-environment | AGE private key for decrypting `secrets.json` |
+
+**Creating the Cloudflare API Token:**
+
+Use an **Account API Token** (not a User API Token) — account tokens are tied to the Cloudflare account, not an individual user, so CI/CD continues to work when team members leave.
+
+1. Go to Cloudflare Dashboard → select your account → **Manage Account** → **Account API Tokens**
+2. **Create Token** → use the **"Edit Cloudflare Workers"** template
+3. Required permissions: **Workers Scripts (Edit)**, **Workers R2 Storage (Edit)**
+4. Set the token as a **repository secret** in GitHub:
+   ```bash
+   gh secret set CLOUDFLARE_API_TOKEN
+   ```
+
+> **Note:** `deploy.sh` injects `account_id` from `.moltbot-env.json` into the wrangler config at deploy time, so the token does not need `/memberships` access.
+
 ## Creating a New Environment
 
 ```bash
-CF_ACCESS_API_TOKEN="<token>" bash scripts/create-env.sh <env-name>
+bash scripts/create-env.sh <env-name>
 ```
 
 ## Secret Management
 
-**Prerequisites:** `SOPS_AGE_KEY` env var must be set.
+**Prerequisites:** `SOPS_AGE_KEY` env var must be set (auto-loaded from credentials in `.moltbot-env.json`).
 
 1. **Add/edit secrets**: `cd overlays/<env> && make edit-secrets` → commit the encrypted `secrets.json`
 2. **Push secrets only**: `cd overlays/<env> && make push-secrets`
