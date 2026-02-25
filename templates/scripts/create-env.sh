@@ -6,11 +6,34 @@ ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 ENV_NAME="${1:?Usage: create-env.sh <env-name>}"
 OVERLAY_DIR="$ROOT_DIR/overlays/$ENV_NAME"
 
-CF_ACCOUNT_ID="<%= cfAccountId %>"
-CF_ACCESS_TEAM_DOMAIN="<%= cfAccessTeamDomain %>"
-MANAGER_AGE_KEY="<%= managerAgeKey %>"
-APP_REPO="<%= appRepo %>"
-WORKER_DOMAIN="moltbot-${ENV_NAME}.<%= workersSubdomain %>.workers.dev"
+CONFIG="$ROOT_DIR/.moltbot-env.json"
+[[ -f "$CONFIG" ]] || { echo "Error: .moltbot-env.json not found" >&2; exit 1; }
+
+CF_ACCOUNT_ID=$(jq -re '.cfAccountId // empty' "$CONFIG") || { echo "Error: cfAccountId missing from .moltbot-env.json" >&2; exit 1; }
+CF_ACCESS_TEAM_DOMAIN=$(jq -re '.cfAccessTeamDomain // empty' "$CONFIG") || { echo "Error: cfAccessTeamDomain missing from .moltbot-env.json" >&2; exit 1; }
+ACCESS_POLICY_EMAIL=$(jq -re '.accessPolicyEmail // empty' "$CONFIG") || { echo "Error: accessPolicyEmail missing from .moltbot-env.json" >&2; exit 1; }
+MANAGER_AGE_KEY=$(jq -re '.managerAgeKey // empty' "$CONFIG") || { echo "Error: managerAgeKey missing from .moltbot-env.json" >&2; exit 1; }
+APP_REPO_SLUG=$(jq -re '.appRepo // empty' "$CONFIG") || { echo "Error: appRepo missing from .moltbot-env.json" >&2; exit 1; }
+WORKERS_SUBDOMAIN=$(jq -re '.workersSubdomain // empty' "$CONFIG") || { echo "Error: workersSubdomain missing from .moltbot-env.json" >&2; exit 1; }
+
+APP_REPO="${APP_REPO:-git@github.com:${APP_REPO_SLUG}.git}"
+case "$APP_REPO" in
+  https://*|git@*|/*) ;;
+  */*) APP_REPO="git@github.com:${APP_REPO}.git" ;;
+esac
+WORKER_DOMAIN="moltbot-${ENV_NAME}.${WORKERS_SUBDOMAIN}.workers.dev"
+
+# --- Credential loading ---
+
+load_credential() {
+  local key="$1" config="$2"
+  local source=$(jq -r --arg k "$key" '.credentials[$k].source' "$config")
+  if [[ "$source" == "keychain" ]] && command -v security &>/dev/null; then
+    local account=$(jq -r --arg k "$key" '.credentials[$k].keychainAccount' "$config")
+    local service=$(jq -r --arg k "$key" '.credentials[$k].keychainService' "$config")
+    security find-generic-password -a "$account" -s "$service" -w 2>/dev/null || true
+  fi
+}
 
 # --- Validation ---
 
@@ -19,7 +42,7 @@ if [[ -d "$OVERLAY_DIR" ]]; then
   exit 1
 fi
 
-for cmd in npx jq sops age curl; do
+for cmd in npx jq sops age age-keygen curl; do
   if ! command -v "$cmd" &>/dev/null; then
     echo "Error: required tool not found: $cmd" >&2
     exit 1
@@ -30,6 +53,11 @@ echo "▶ Checking wrangler auth..."
 if ! npx wrangler whoami &>/dev/null; then
   echo "Error: wrangler is not logged in. Run 'npx wrangler login' first." >&2
   exit 1
+fi
+
+if [[ -z "${CF_ACCESS_API_TOKEN:-}" ]]; then
+  CF_ACCESS_API_TOKEN=$(load_credential cfAccessApiToken "$CONFIG")
+  export CF_ACCESS_API_TOKEN
 fi
 
 if [[ -z "${CF_ACCESS_API_TOKEN:-}" ]]; then
@@ -77,11 +105,11 @@ POLICY_RESPONSE=$(curl -s -X POST \
   "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/access/apps/$APP_ID/policies" \
   -H "Authorization: Bearer $CF_ACCESS_API_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{
-    "name": "Allow owner",
-    "decision": "allow",
-    "include": [{"email": {"email": "<%= accessPolicyEmail %>"}}]
-  }')
+  -d "{
+    \"name\": \"Allow owner\",
+    \"decision\": \"allow\",
+    \"include\": [{\"email\": {\"email\": \"${ACCESS_POLICY_EMAIL}\"}}]
+  }")
 
 if [[ "$(echo "$POLICY_RESPONSE" | jq -r '.success')" != "true" ]]; then
   echo "Error: Failed to create Access policy:" >&2
@@ -131,6 +159,8 @@ DEFAULT_MODEL="${DEFAULT_MODEL:-google/gemini-3-flash-preview}"
 
 # version.txt — latest main SHA from app repo
 echo "▶ Fetching latest app version..."
+# Design Decision: LATEST_SHA not validated for empty; git ls-remote failure is caught by set -e,
+# and an empty main branch is unlikely. Proper validation deferred to a future PR.
 LATEST_SHA=$(git ls-remote "$APP_REPO" refs/heads/main | cut -c1-7)
 echo "$LATEST_SHA" > "$OVERLAY_DIR/version.txt"
 echo "  Version: $LATEST_SHA"
@@ -138,23 +168,33 @@ echo "  Version: $LATEST_SHA"
 # Makefile symlink
 ln -s ../../Makefile "$OVERLAY_DIR/Makefile"
 
-# --- .sops.yaml ---
+# --- .sops.yaml + env AGE key ---
+
+echo "▶ Generating env AGE key pair..."
+KEYGEN_OUTPUT=$(age-keygen 2>&1)
+ENV_AGE_PUBLIC_KEY=$(echo "$KEYGEN_OUTPUT" | grep "public key:" | awk '{print $NF}')
+ENV_AGE_PRIVATE_KEY=$(echo "$KEYGEN_OUTPUT" | grep "AGE-SECRET-KEY-")
+
+if [[ -z "$ENV_AGE_PUBLIC_KEY" || -z "$ENV_AGE_PRIVATE_KEY" ]]; then
+  echo "Error: failed to generate AGE key pair" >&2
+  exit 1
+fi
 
 echo "▶ Updating .sops.yaml"
 SOPS_FILE="$ROOT_DIR/.sops.yaml"
 
-# Find the last creation_rule entry and append after it (before the trailing comments)
 if grep -q "path_regex: overlays/${ENV_NAME}/secrets" "$SOPS_FILE" 2>/dev/null; then
   echo "  .sops.yaml rule for $ENV_NAME already exists, skipping"
 else
   SOPS_TMP=$(mktemp)
-  awk -v env="$ENV_NAME" -v key="$MANAGER_AGE_KEY" '
+  trap 'rm -f "$SOPS_TMP"' EXIT
+  awk -v env="$ENV_NAME" -v env_key="$ENV_AGE_PUBLIC_KEY" -v mgr_key="$MANAGER_AGE_KEY" '
     /^# Per-env key generation steps/ {
       print "  - path_regex: overlays/" env "/secrets\\.json$"
       print "    age: >-"
-      print "      " key
-      print "    # manager"
-      print "    # TODO: add " env " env key when CI/CD is set up"
+      print "      " env_key ","
+      print "      " mgr_key
+      print "    # env, manager"
       print ""
     }
     { print }
@@ -172,6 +212,11 @@ echo "  CF Access AUD: $CF_ACCESS_AUD"
 echo "  Worker domain: $WORKER_DOMAIN"
 echo "  Overlay dir:   overlays/$ENV_NAME/"
 echo "  App version:   $LATEST_SHA"
+echo ""
+# Design Decision: Private key printed to stdout for now; these scripts are interactive-only
+# and not invoked in CI. Separating stdout/stderr output is deferred to a future PR.
+echo "ENV_AGE_PUBLIC_KEY=$ENV_AGE_PUBLIC_KEY"
+echo "ENV_AGE_PRIVATE_KEY=$ENV_AGE_PRIVATE_KEY"
 echo ""
 echo "Next steps:"
 echo "  1. Create R2 API Token at: https://dash.cloudflare.com/${CF_ACCOUNT_ID}/r2/api-tokens"

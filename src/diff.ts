@@ -20,9 +20,28 @@ function getCliVersion(): string {
 }
 
 function getRepoMeta(): Meta | null {
-  const metaPath = path.resolve(process.cwd(), ".moltbot-env-meta.json");
-  if (!fs.existsSync(metaPath)) return null;
-  return JSON.parse(fs.readFileSync(metaPath, "utf8"));
+  // Try .moltbot-env.json first (v0.2.0+)
+  const configPath = path.resolve(process.cwd(), ".moltbot-env.json");
+  if (fs.existsSync(configPath)) {
+    try {
+      const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+      if (config.meta) return config.meta;
+    } catch (err) {
+      throw new Error(`Failed to parse ${configPath}: ${(err as Error).message}`);
+    }
+  }
+
+  // Fall back to .moltbot-env-meta.json (v0.1.x)
+  const legacyPath = path.resolve(process.cwd(), ".moltbot-env-meta.json");
+  if (fs.existsSync(legacyPath)) {
+    try {
+      return JSON.parse(fs.readFileSync(legacyPath, "utf8"));
+    } catch (err) {
+      throw new Error(`Failed to parse ${legacyPath}: ${(err as Error).message}`);
+    }
+  }
+
+  return null;
 }
 
 function getMigrationFiles(): { from: string; to: string; file: string }[] {
@@ -74,9 +93,9 @@ export async function diff(args: string[]) {
   const meta = getRepoMeta();
   if (!meta) {
     if (jsonOutput) {
-      console.log(JSON.stringify({ error: "no_meta", message: ".moltbot-env-meta.json not found in current directory" }));
+      console.log(JSON.stringify({ error: "no_meta", message: ".moltbot-env.json not found in current directory" }));
     } else {
-      console.error(chalk.red("Error: .moltbot-env-meta.json not found in current directory."));
+      console.error(chalk.red("Error: .moltbot-env.json not found in current directory."));
       console.error(chalk.dim("Are you running this from a moltbot-env repo?"));
     }
     process.exit(1);

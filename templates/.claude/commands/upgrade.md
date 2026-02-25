@@ -14,6 +14,6 @@ If migrations are available, apply each instruction in order:
 - For static files, replace with the provided content
 
 After all migrations are applied:
-- Update .moltbot-env-meta.json with the new version and today's date
+- Update `.moltbot-env.json` → `meta.version` with the new version and `meta.lastUpgrade` with today's date
 - Stage and show the user a summary of all changes made
 - Do NOT commit automatically — let the user review first

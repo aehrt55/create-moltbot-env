@@ -1,0 +1,26 @@
+{
+  "appRepo": "<%= appRepo %>",
+  "envRepo": "<%= envRepo %>",
+  "cfAccountId": "<%= cfAccountId %>",
+  "workersSubdomain": "<%= workersSubdomain %>",
+  "cfAccessTeamDomain": "<%= cfAccessTeamDomain %>",
+  "accessPolicyEmail": "<%= accessPolicyEmail %>",
+  "managerAgeKey": "<%= managerAgeKey %>",
+  "credentials": {
+    "sopsAgeKey": {
+      "source": "keychain",
+      "keychainAccount": "sops-age",
+      "keychainService": "sops-age-key"
+    },
+    "cfAccessApiToken": {
+      "source": "keychain",
+      "keychainAccount": "cf-access-api-token",
+      "keychainService": "cf-access-api-token"
+    }
+  },
+  "meta": {
+    "version": "<%= version %>",
+    "createdAt": "<%= createdAt %>",
+    "lastUpgrade": null
+  }
+}

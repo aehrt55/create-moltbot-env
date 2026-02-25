@@ -1,6 +1,5 @@
 SHELL := /bin/bash
 ROOT := $(patsubst %/,%,$(dir $(realpath $(lastword $(MAKEFILE_LIST)))))
-APP_REPO := <%= appRepo %>
 OVERLAY_DIR := $(CURDIR)
 ENV_NAME := $(notdir $(OVERLAY_DIR))
 STRIP_JSONC := node $(ROOT)/scripts/jsonc-strip.js

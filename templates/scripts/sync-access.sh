@@ -14,8 +14,24 @@ ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 ENV_NAME="${1:?Usage: sync-access.sh <env-name>}"
 OVERLAY_DIR="$ROOT_DIR/overlays/$ENV_NAME"
 
-CF_ACCOUNT_ID="<%= cfAccountId %>"
+CONFIG="$ROOT_DIR/.moltbot-env.json"
+[[ -f "$CONFIG" ]] || { echo "Error: .moltbot-env.json not found" >&2; exit 1; }
+
+CF_ACCOUNT_ID=$(jq -re '.cfAccountId // empty' "$CONFIG") || { echo "Error: cfAccountId missing from .moltbot-env.json" >&2; exit 1; }
+WORKERS_SUBDOMAIN=$(jq -re '.workersSubdomain // empty' "$CONFIG") || { echo "Error: workersSubdomain missing from .moltbot-env.json" >&2; exit 1; }
 API_BASE="https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/access/apps"
+
+# --- Credential loading ---
+
+load_credential() {
+  local key="$1" config="$2"
+  local source=$(jq -r --arg k "$key" '.credentials[$k].source' "$config")
+  if [[ "$source" == "keychain" ]] && command -v security &>/dev/null; then
+    local account=$(jq -r --arg k "$key" '.credentials[$k].keychainAccount' "$config")
+    local service=$(jq -r --arg k "$key" '.credentials[$k].keychainService' "$config")
+    security find-generic-password -a "$account" -s "$service" -w 2>/dev/null || true
+  fi
+}
 
 # --- Validation ---
 
@@ -32,6 +48,11 @@ for cmd in curl jq node npx; do
 done
 
 if [[ -z "${CF_ACCESS_API_TOKEN:-}" ]]; then
+  CF_ACCESS_API_TOKEN=$(load_credential cfAccessApiToken "$CONFIG")
+  export CF_ACCESS_API_TOKEN
+fi
+
+if [[ -z "${CF_ACCESS_API_TOKEN:-}" ]]; then
   echo "Error: CF_ACCESS_API_TOKEN environment variable is required." >&2
   echo "  See docs/cf-api-token.md for how to create one." >&2
   exit 1
@@ -42,7 +63,7 @@ unset CF_API_TOKEN CLOUDFLARE_API_TOKEN
 
 STRIP="node $SCRIPT_DIR/jsonc-strip.js"
 WORKER_NAME=$($STRIP "$OVERLAY_DIR/wrangler.jsonc" | jq -r '.name')
-WORKER_DOMAIN="${WORKER_NAME}.<%= workersSubdomain %>.workers.dev"
+WORKER_DOMAIN="${WORKER_NAME}.${WORKERS_SUBDOMAIN}.workers.dev"
 MAIN_APP_NAME="${WORKER_NAME} - Cloudflare Workers"
 WEBHOOK_APP_NAME="${WORKER_NAME}-telegram-webhook"
 WEBHOOK_DOMAIN="${WORKER_DOMAIN}/telegram/webhook"
