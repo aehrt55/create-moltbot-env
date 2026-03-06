@@ -13,6 +13,10 @@ fi
 # In CI, CLOUDFLARE_API_TOKEN must be set; locally, wrangler uses its own OAuth session
 if [[ -n "${CI:-}" ]]; then
   [[ -n "${CLOUDFLARE_API_TOKEN:-}" ]] || { echo "Error: CLOUDFLARE_API_TOKEN not set" >&2; exit 1; }
+else
+  # Locally: unset deprecated CF_API_TOKEN so wrangler uses OAuth instead of a
+  # potentially wrong token (e.g. CF Access token leaked into the env)
+  unset CF_API_TOKEN 2>/dev/null || true
 fi
 
 CONFIG="$ROOT_DIR/.moltbot-env.json"
@@ -28,6 +32,31 @@ case "$APP_REPO" in
   https://*|git@*|/*) ;;
   */*) APP_REPO="git@github.com:${APP_REPO}.git" ;;
 esac
+
+# --- Credential loading (local only) ---
+
+load_credential() {
+  local key="$1"
+  local source=$(jq -r --arg k "$key" '.credentials[$k].source // empty' "$CONFIG")
+  if [[ "$source" == "keychain" ]] && command -v security &>/dev/null; then
+    local account=$(jq -r --arg k "$key" '.credentials[$k].keychainAccount' "$CONFIG")
+    local service=$(jq -r --arg k "$key" '.credentials[$k].keychainService' "$CONFIG")
+    security find-generic-password -a "$account" -s "$service" -w 2>/dev/null || true
+  fi
+}
+
+# Load SOPS_AGE_KEY from keychain if not set
+if [[ -z "${SOPS_AGE_KEY:-}" ]]; then
+  SOPS_AGE_KEY=$(load_credential sopsAgeKey)
+  export SOPS_AGE_KEY
+fi
+
+# Load CF_ACCESS_API_TOKEN from keychain if not set (for sync-access pre-deploy check)
+if [[ -z "${CF_ACCESS_API_TOKEN:-}" ]]; then
+  CF_ACCESS_API_TOKEN=$(load_credential cfAccessApiToken)
+  export CF_ACCESS_API_TOKEN
+fi
+
 # Validate SOPS_AGE_KEY before deploying to prevent partial deploys (code without secrets)
 if [[ -f "$OVERLAY_DIR/secrets.json" ]]; then
   [[ -n "${SOPS_AGE_KEY:-}" ]] || { echo "Error: SOPS_AGE_KEY not set but secrets.json exists — would cause partial deploy" >&2; exit 1; }
@@ -37,6 +66,17 @@ WORK_DIR="/tmp/deploy-moltbot-$$"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
 echo "▶ Deploying moltbot @ ${VERSION} (${ENV_NAME})"
+
+# 0. Pre-deploy: ensure infrastructure is in sync
+echo "▶ Pre-deploy checks..."
+bash "$SCRIPT_DIR/ensure-queue.sh" "$ENV_NAME"
+
+# sync-access needs CF_ACCESS_API_TOKEN (separate from CLOUDFLARE_API_TOKEN)
+if [[ -n "${CF_ACCESS_API_TOKEN:-}" ]]; then
+  bash "$SCRIPT_DIR/sync-access.sh" "$ENV_NAME"
+else
+  echo "  ⏭ Skipping Access sync (CF_ACCESS_API_TOKEN not set)"
+fi
 
 # 1. Clone app repo at pinned version
 git clone "$APP_REPO" "$WORK_DIR"

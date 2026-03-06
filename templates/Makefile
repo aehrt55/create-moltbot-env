@@ -4,7 +4,7 @@ OVERLAY_DIR := $(CURDIR)
 ENV_NAME := $(notdir $(OVERLAY_DIR))
 STRIP_JSONC := node $(ROOT)/scripts/jsonc-strip.js
 
-.PHONY: deploy secret wrangler merged-config edit-secrets push-secrets sync-access
+.PHONY: deploy secret wrangler merged-config edit-secrets push-secrets sync-access ensure-queue
 
 # Full deploy: clone app repo → npm ci → merge configs → wrangler deploy
 deploy:
@@ -30,6 +30,10 @@ merged-config:
 # Sync Cloudflare Access apps (creates/removes webhook bypass as needed)
 sync-access:
 	@bash $(ROOT)/scripts/sync-access.sh $(ENV_NAME)
+
+# Ensure Cloudflare Queues exist for overlay config
+ensure-queue:
+	@bash $(ROOT)/scripts/ensure-queue.sh $(ENV_NAME)
 
 # Edit secrets via SOPS (requires SOPS_AGE_KEY env var)
 edit-secrets:
