@@ -28,12 +28,12 @@ EJS templates (`templates/**/*.ejs`) are rendered with these variables, then wri
 
 ```typescript
 interface TemplateVars {
+  appRepo: string;            // GitHub slug for moltbot-app (e.g. "marxbiotech/moltbot-app")
+  envRepo: string;            // GitHub slug for moltbot-env (e.g. "org/moltbot-env")
   cfAccountId: string;        // 32-char hex Cloudflare Account ID
   workersSubdomain: string;   // e.g. "myteam" → *.myteam.workers.dev
   cfAccessTeamDomain: string; // e.g. "myteam.cloudflareaccess.com"
   accessPolicyEmail: string;  // email for CF Access allow-list
-  appRepo: string;            // git URL for moltbot-app
-  envRepo: string;            // GitHub slug for moltbot-env (e.g. "org/moltbot-env")
   managerAgeKey: string;      // AGE public key (age1...)
   version: string;            // CLI package.json version
   createdAt: string;          // ISO date (YYYY-MM-DD)

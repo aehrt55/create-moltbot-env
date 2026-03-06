@@ -33,6 +33,11 @@ DEFAULT_DLQ="${WORKER_NAME}-telegram-dlq"
 # Check if queue config already exists in overlay
 HAS_QUEUES=$(echo "$OVERLAY_JSON" | jq 'has("queues")') || { echo "Error: failed to parse overlay wrangler.jsonc" >&2; exit 1; }
 
+# Design Decision: Auto-inject default queue config when missing, rather than failing.
+# This ensures environments without explicit queue config can still deploy successfully.
+# The injected config uses a predictable naming pattern ({worker}-telegram + DLQ).
+# A warning is printed to stderr reminding the user to commit the change.
+# In CI, the injection is ephemeral (lost after deploy) but queue creation is idempotent.
 if [[ "$HAS_QUEUES" != "true" ]]; then
   echo "  ▶ No queues config found, injecting default pattern..."
 
@@ -64,6 +69,7 @@ JSONEOF
     echo "  ⚠ Modified $WRANGLER_FILE — commit this change to persist" >&2
   else
     echo "Error: could not inject queues config (no JSON key found in wrangler.jsonc)" >&2
+    rm -f "$BLOCK_FILE"
     exit 1
   fi
   rm -f "$BLOCK_FILE"
@@ -87,11 +93,14 @@ fi
 
 echo "▶ Ensuring queues for $ENV_NAME..."
 
-# Fetch existing queues via wrangler
-if ! EXISTING_RAW=$(npx wrangler queues list --json 2>/dev/null); then
-  echo "Error: failed to list queues" >&2
+# Fetch existing queues via wrangler (stderr captured separately to preserve diagnostics)
+WRANGLER_STDERR=$(mktemp)
+if ! EXISTING_RAW=$(npx wrangler queues list --json 2>"$WRANGLER_STDERR"); then
+  echo "Error: failed to list queues: $(cat "$WRANGLER_STDERR")" >&2
+  rm -f "$WRANGLER_STDERR"
   exit 1
 fi
+rm -f "$WRANGLER_STDERR"
 EXISTING=$(echo "$EXISTING_RAW" | jq -r '.[].queue_name') || { echo "Error: failed to parse queue list output" >&2; exit 1; }
 
 for QUEUE_NAME in $QUEUE_NAMES; do
@@ -99,7 +108,7 @@ for QUEUE_NAME in $QUEUE_NAMES; do
     echo "  ✓ $QUEUE_NAME (exists)"
   else
     echo "  ▶ Creating $QUEUE_NAME..."
-    if npx wrangler queues create "$QUEUE_NAME" 2>&1; then
+    if npx wrangler queues create "$QUEUE_NAME"; then
       echo "  ✓ $QUEUE_NAME (created)"
     else
       echo "Error: failed to create queue '$QUEUE_NAME'" >&2

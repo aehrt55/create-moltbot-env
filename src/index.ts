@@ -7,6 +7,7 @@ import prompts from "prompts";
 import chalk from "chalk";
 import ejs from "ejs";
 import { diff } from "./diff.js";
+import { getCliVersion } from "./utils.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TEMPLATES_DIR = path.resolve(__dirname, "..", "templates");
@@ -37,13 +38,6 @@ function commandExists(cmd: string): boolean {
   } catch {
     return false;
   }
-}
-
-function getCliVersion(): string {
-  const pkg = JSON.parse(
-    fs.readFileSync(path.resolve(__dirname, "..", "package.json"), "utf8")
-  );
-  return pkg.version;
 }
 
 async function main() {
