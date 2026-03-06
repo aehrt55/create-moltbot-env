@@ -10,7 +10,7 @@ GitOps overlay pattern — each overlay stores its complete `vars` block plus en
 overlays/<env>/
 ├── Makefile → ../../Makefile      # Symlink to shared targets
 ├── wrangler.jsonc                 # Environment config overrides
-├── version.txt                    # Pinned app commit SHA
+├── version.txt                    # Pinned app git ref (SHA, tag, or branch)
 └── secrets.json                   # SOPS-encrypted secrets (AGE)
 ```
 

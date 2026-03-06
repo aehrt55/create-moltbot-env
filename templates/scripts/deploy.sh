@@ -26,7 +26,7 @@ APP_REPO_SLUG=$(jq -re '.appRepo // empty' "$CONFIG") || { echo "Error: appRepo 
 CF_ACCOUNT_ID=$(jq -re '.cfAccountId // empty' "$CONFIG") || { echo "Error: cfAccountId missing from .moltbot-env.json" >&2; exit 1; }
 
 VERSION=$(tr -d '[:space:]' < "$OVERLAY_DIR/version.txt")
-[[ "$VERSION" =~ ^[0-9a-f]{7,40}$ ]] || { echo "Error: invalid SHA in version.txt: '$VERSION'" >&2; exit 1; }
+[[ -n "$VERSION" ]] || { echo "Error: version.txt is empty" >&2; exit 1; }
 APP_REPO="${APP_REPO:-git@github.com:${APP_REPO_SLUG}.git}"
 case "$APP_REPO" in
   https://*|git@*|/*) ;;
@@ -97,6 +97,8 @@ fi
 git clone "$APP_REPO" "$WORK_DIR"
 cd "$WORK_DIR"
 git checkout "$VERSION"
+RESOLVED_SHA=$(git rev-parse --short HEAD)
+echo "  Resolved: ${VERSION} → ${RESOLVED_SHA}"
 
 # 2. Install dependencies
 npm ci
@@ -121,4 +123,4 @@ if [[ -f "$OVERLAY_DIR/secrets.json" ]]; then
   rm -f "$secrets"
 fi
 
-echo "✅ Deploy complete: moltbot @ ${VERSION} (${ENV_NAME})"
+echo "✅ Deploy complete: moltbot @ ${RESOLVED_SHA} (${ENV_NAME})"
