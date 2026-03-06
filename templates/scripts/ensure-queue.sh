@@ -17,7 +17,7 @@ OVERLAY_DIR="$ROOT_DIR/overlays/$ENV_NAME"
 [[ -d "$OVERLAY_DIR" ]] || { echo "Error: overlay '$ENV_NAME' not found" >&2; exit 1; }
 
 # Prevent wrangler from picking up CF_API_TOKEN (e.g. CF Access token leaked into env)
-unset CF_API_TOKEN 2>/dev/null || true
+unset CF_API_TOKEN
 
 STRIP="node $SCRIPT_DIR/jsonc-strip.js"
 OVERLAY_JSON=$($STRIP "$OVERLAY_DIR/wrangler.jsonc")
@@ -29,7 +29,7 @@ DEFAULT_QUEUE="${WORKER_NAME}-telegram"
 DEFAULT_DLQ="${WORKER_NAME}-telegram-dlq"
 
 # Check if queue config already exists in overlay
-HAS_QUEUES=$(echo "$OVERLAY_JSON" | jq 'has("queues")' 2>/dev/null || echo "false")
+HAS_QUEUES=$(echo "$OVERLAY_JSON" | jq 'has("queues")') || { echo "Error: failed to parse overlay wrangler.jsonc" >&2; exit 1; }
 
 if [[ "$HAS_QUEUES" != "true" ]]; then
   echo "  ▶ No queues config found, injecting default pattern..."
@@ -74,7 +74,7 @@ QUEUE_NAMES=$(echo "$OVERLAY_JSON" | jq -r '
     (.queues.producers // [] | .[].queue),
     (.queues.consumers // [] | .[].queue),
     (.queues.consumers // [] | .[].dead_letter_queue // empty)
-  ] | unique | .[]' 2>/dev/null || true)
+  ] | unique | .[]') || { echo "Error: failed to extract queue names from overlay config" >&2; exit 1; }
 
 if [[ -z "$QUEUE_NAMES" ]]; then
   echo "  ⏭ No queues to create"
@@ -84,7 +84,12 @@ fi
 echo "▶ Ensuring queues for $ENV_NAME..."
 
 # Fetch existing queues via wrangler (table format: extract name column)
-EXISTING=$(npx wrangler queues list 2>/dev/null | awk -F '│' 'NR>3 && NF>2 {gsub(/^ +| +$/, "", $3); if ($3 != "" && $3 !~ /^-/) print $3}' || true)
+if ! EXISTING_RAW=$(npx wrangler queues list 2>&1); then
+  echo "Error: failed to list queues:" >&2
+  echo "$EXISTING_RAW" >&2
+  exit 1
+fi
+EXISTING=$(echo "$EXISTING_RAW" | awk -F '│' 'NR>3 && NF>2 {gsub(/^ +| +$/, "", $3); if ($3 != "" && $3 !~ /^-/) print $3}')
 
 for QUEUE_NAME in $QUEUE_NAMES; do
   if echo "$EXISTING" | grep -qx "$QUEUE_NAME"; then
@@ -94,7 +99,8 @@ for QUEUE_NAME in $QUEUE_NAMES; do
     if npx wrangler queues create "$QUEUE_NAME" 2>&1; then
       echo "  ✓ $QUEUE_NAME (created)"
     else
-      echo "  ⚠ Failed to create $QUEUE_NAME" >&2
+      echo "Error: failed to create queue '$QUEUE_NAME'" >&2
+      exit 1
     fi
   fi
 done

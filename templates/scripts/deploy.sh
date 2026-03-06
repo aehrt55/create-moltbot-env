@@ -16,7 +16,7 @@ if [[ -n "${CI:-}" ]]; then
 else
   # Locally: unset deprecated CF_API_TOKEN so wrangler uses OAuth instead of a
   # potentially wrong token (e.g. CF Access token leaked into the env)
-  unset CF_API_TOKEN 2>/dev/null || true
+  unset CF_API_TOKEN
 fi
 
 CONFIG="$ROOT_DIR/.moltbot-env.json"
@@ -38,10 +38,24 @@ esac
 load_credential() {
   local key="$1"
   local source=$(jq -r --arg k "$key" '.credentials[$k].source // empty' "$CONFIG")
-  if [[ "$source" == "keychain" ]] && command -v security &>/dev/null; then
-    local account=$(jq -r --arg k "$key" '.credentials[$k].keychainAccount' "$CONFIG")
-    local service=$(jq -r --arg k "$key" '.credentials[$k].keychainService' "$CONFIG")
-    security find-generic-password -a "$account" -s "$service" -w 2>/dev/null || true
+  [[ -n "$source" ]] || return 0
+  if [[ "$source" == "keychain" ]]; then
+    if ! command -v security &>/dev/null; then
+      echo "Warning: credential '$key' configured for keychain but 'security' not found" >&2
+      return 0
+    fi
+    local account=$(jq -r --arg k "$key" '.credentials[$k].keychainAccount // empty' "$CONFIG")
+    local service=$(jq -r --arg k "$key" '.credentials[$k].keychainService // empty' "$CONFIG")
+    if [[ -z "$account" || -z "$service" ]]; then
+      echo "Warning: credential '$key' missing keychainAccount or keychainService" >&2
+      return 0
+    fi
+    security find-generic-password -a "$account" -s "$service" -w 2>/dev/null || {
+      echo "Warning: failed to load '$key' from keychain" >&2
+      return 0
+    }
+  else
+    echo "Warning: unknown credential source '$source' for '$key'" >&2
   fi
 }
 
