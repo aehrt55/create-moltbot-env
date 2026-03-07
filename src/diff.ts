@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import chalk from "chalk";
+import { getCliVersion } from "./utils.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS_DIR = path.resolve(__dirname, "..", "migrations");
@@ -12,11 +13,10 @@ interface Meta {
   lastUpgrade: string | null;
 }
 
-function getCliVersion(): string {
-  const pkg = JSON.parse(
-    fs.readFileSync(path.resolve(__dirname, "..", "package.json"), "utf8")
-  );
-  return pkg.version;
+interface Migration {
+  from: string;
+  to: string;
+  file: string;
 }
 
 function getRepoMeta(): Meta | null {
@@ -25,7 +25,13 @@ function getRepoMeta(): Meta | null {
   if (fs.existsSync(configPath)) {
     try {
       const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
-      if (config.meta) return config.meta;
+      if (config.meta) {
+        const meta: Meta = config.meta;
+        if (!/^\d+\.\d+\.\d+$/.test(meta.version)) {
+          throw new Error(`Invalid version format in .moltbot-env.json: "${meta.version}" (expected semver like "0.3.0")`);
+        }
+        return meta;
+      }
     } catch (err) {
       throw new Error(`Failed to parse ${configPath}: ${(err as Error).message}`);
     }
@@ -35,7 +41,11 @@ function getRepoMeta(): Meta | null {
   const legacyPath = path.resolve(process.cwd(), ".moltbot-env-meta.json");
   if (fs.existsSync(legacyPath)) {
     try {
-      return JSON.parse(fs.readFileSync(legacyPath, "utf8"));
+      const meta: Meta = JSON.parse(fs.readFileSync(legacyPath, "utf8"));
+      if (!/^\d+\.\d+\.\d+$/.test(meta.version)) {
+        throw new Error(`Invalid version format in .moltbot-env-meta.json: "${meta.version}" (expected semver like "0.3.0")`);
+      }
+      return meta;
     } catch (err) {
       throw new Error(`Failed to parse ${legacyPath}: ${(err as Error).message}`);
     }
@@ -44,7 +54,7 @@ function getRepoMeta(): Meta | null {
   return null;
 }
 
-function getMigrationFiles(): { from: string; to: string; file: string }[] {
+function getMigrationFiles(): Migration[] {
   if (!fs.existsSync(MIGRATIONS_DIR)) return [];
   return fs
     .readdirSync(MIGRATIONS_DIR)
@@ -54,7 +64,7 @@ function getMigrationFiles(): { from: string; to: string; file: string }[] {
       if (!match) return null;
       return { from: match[1], to: match[2], file: f };
     })
-    .filter((x): x is { from: string; to: string; file: string } => x !== null)
+    .filter((x): x is Migration => x !== null)
     .sort((a, b) => compareVersions(a.from, b.from));
 }
 
@@ -72,9 +82,9 @@ function compareVersions(a: string, b: string): number {
 function buildMigrationChain(
   currentVersion: string,
   targetVersion: string,
-  migrations: { from: string; to: string; file: string }[]
-): { from: string; to: string; file: string }[] {
-  const chain: { from: string; to: string; file: string }[] = [];
+  migrations: Migration[]
+): Migration[] {
+  const chain: Migration[] = [];
   let version = currentVersion;
 
   while (compareVersions(version, targetVersion) < 0) {

@@ -1,9 +1,9 @@
 # create-moltbot-env
 
-Scaffold a GitOps environment repository for deploying [moltbot-app](https://github.com/aehrt55/moltbot-app) on Cloudflare Workers.
+Scaffold a GitOps environment repository for deploying [moltbot-app](https://github.com/marxbiotech/moltbot-app) on Cloudflare Workers.
 
 ```bash
-npx @aehrt55/create-moltbot-env
+npx @marxbiotech/create-moltbot-env
 ```
 
 ## What It Does
@@ -28,7 +28,7 @@ npm install -g wrangler
 ## Usage
 
 ```bash
-npx @aehrt55/create-moltbot-env
+npx @marxbiotech/create-moltbot-env
 ```
 
 The CLI walks you through these prompts:
@@ -40,7 +40,8 @@ The CLI walks you through these prompts:
 | Workers subdomain | `myteam` | Your `*.myteam.workers.dev` subdomain |
 | CF Access team domain | `myteam.cloudflareaccess.com` | Auto-derived from subdomain |
 | Access policy email | `you@example.com` | Email for initial Access allow-list |
-| App repo git URL | `git@github.com:aehrt55/moltbot-app.git` | Default provided |
+| App repo slug | `marxbiotech/moltbot-app` | `owner/repo` format |
+| Env repo slug | `marxbiotech/moltbot-env` | Auto-derived from app repo owner |
 | Generate AGE key pair? | `Y` | Creates manager key for secret encryption |
 
 On completion, the CLI:
@@ -52,23 +53,28 @@ On completion, the CLI:
 
 ```
 moltbot-env/
-├── Makefile                         # Shared make targets
+├── .moltbot-env.json                # Runtime config (account IDs, repo slugs, credentials, version)
 ├── .sops.yaml                       # SOPS encryption rules (empty initially)
-├── .moltbot-env-meta.json           # Version tracking for upgrades
-├── overlays/                        # Per-environment directories (created via create-env.sh)
+├── Makefile                         # Shared make targets
+├── .claude/commands/
+│   ├── create-env.md                # Claude Code: guided environment creation
+│   ├── delete-env.md                # Claude Code: guided environment deletion
+│   ├── setup-env-age-key.md         # Claude Code: AGE key setup for CI/CD
+│   └── upgrade.md                   # Claude Code: agent-native upgrade
+├── .github/workflows/
+│   └── deploy.yml                   # CI/CD: auto-deploy on overlay changes
 ├── scripts/
+│   ├── deploy.sh                    # Clone app → merge config → wrangler deploy
 │   ├── create-env.sh                # Create: R2 bucket + CF Access + overlay
 │   ├── delete-env.sh                # Delete: reverse of create-env
-│   ├── deploy.sh                    # Clone app → merge config → wrangler deploy
+│   ├── ensure-queue.sh              # Ensure Cloudflare Queues exist
+│   ├── setup-env-age-key.sh         # Generate/regenerate AGE key pair
 │   ├── sync-access.sh               # Reconcile CF Access webhook bypass apps
 │   └── jsonc-strip.js               # JSONC → JSON converter
 ├── docs/
 │   ├── cf-api-token.md              # How to create CF Access API token
 │   └── sops-age.md                  # SOPS + AGE guide
-└── .claude/commands/
-    ├── create-env.md                # Claude Code: guided environment creation
-    ├── delete-env.md                # Claude Code: guided environment deletion
-    └── upgrade.md                   # Claude Code: agent-native upgrade
+└── overlays/                        # Per-environment directories (created via create-env.sh)
 ```
 
 ## Quick Start
@@ -193,13 +199,13 @@ When a new version of this CLI is released with template changes, upgrade your e
 
 ```bash
 # Check for available migrations
-npx @aehrt55/create-moltbot-env diff
+npx @marxbiotech/create-moltbot-env diff
 
 # Or use Claude Code
 /upgrade
 ```
 
-The `diff` subcommand reads `.moltbot-env-meta.json` in your repo, compares against the latest CLI version, and outputs migration instructions as markdown. Claude Code's `/upgrade` command runs this automatically and applies changes semantically.
+The `diff` subcommand reads `.moltbot-env.json` in your repo, compares against the latest CLI version, and outputs migration instructions as markdown. Claude Code's `/upgrade` command runs this automatically and applies changes semantically.
 
 ## License
 
