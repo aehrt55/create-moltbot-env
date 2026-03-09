@@ -32,15 +32,15 @@ WORKER_NAME=$(echo "$OVERLAY_JSON" | jq -r '.name // empty')
 [[ -n "$WORKER_NAME" ]] || { echo "Error: 'name' missing from overlay wrangler.jsonc" >&2; exit 1; }
 
 # Default queue naming pattern
-DEFAULT_QUEUE="${WORKER_NAME}-telegram"
-DEFAULT_DLQ="${WORKER_NAME}-telegram-dlq"
+DEFAULT_QUEUE="${WORKER_NAME}-webhook"
+DEFAULT_DLQ="${WORKER_NAME}-webhook-dlq"
 
 # Check if queue config already exists in overlay
 HAS_QUEUES=$(echo "$OVERLAY_JSON" | jq 'has("queues")') || { echo "Error: failed to parse overlay wrangler.jsonc" >&2; exit 1; }
 
 # Design Decision: Auto-inject default queue config when missing, rather than failing.
 # This ensures environments without explicit queue config can still deploy successfully.
-# The injected config uses a predictable naming pattern ({worker}-telegram + DLQ).
+# The injected config uses a predictable naming pattern ({worker}-webhook + DLQ).
 # A warning is printed to stderr reminding the user to commit the change.
 # In CI, the injection is ephemeral (lost after deploy) but queue creation is idempotent.
 if [[ "$HAS_QUEUES" != "true" ]]; then
@@ -51,7 +51,7 @@ if [[ "$HAS_QUEUES" != "true" ]]; then
   BLOCK_FILE=$(mktemp)
   cat > "$BLOCK_FILE" <<JSONEOF
   "queues": {
-    "producers": [{ "binding": "TELEGRAM_QUEUE", "queue": "${DEFAULT_QUEUE}" }],
+    "producers": [{ "binding": "WEBHOOK_QUEUE", "queue": "${DEFAULT_QUEUE}" }],
     "consumers": [{
       "queue": "${DEFAULT_QUEUE}",
       "dead_letter_queue": "${DEFAULT_DLQ}",

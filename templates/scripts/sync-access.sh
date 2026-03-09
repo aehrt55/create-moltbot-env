@@ -5,7 +5,9 @@ set -euo pipefail
 #
 # For each overlay, ensures:
 # 1. A main Access app exists (domain-level protection)
-# 2. A webhook bypass app exists if TELEGRAM_WEBHOOK_SECRET is in secrets
+# 2. Webhook bypass apps exist for configured channels:
+#    - /telegram/webhook if TELEGRAM_WEBHOOK_SECRET is in secrets
+#    - /slack/events if SLACK_SIGNING_SECRET is in secrets
 #
 # Usage: sync-access.sh <env-name>
 
@@ -65,8 +67,12 @@ STRIP="node $SCRIPT_DIR/jsonc-strip.js"
 WORKER_NAME=$($STRIP "$OVERLAY_DIR/wrangler.jsonc" | jq -r '.name')
 WORKER_DOMAIN="${WORKER_NAME}.${WORKERS_SUBDOMAIN}.workers.dev"
 MAIN_APP_NAME="${WORKER_NAME} - Cloudflare Workers"
-WEBHOOK_APP_NAME="${WORKER_NAME}-telegram-webhook"
-WEBHOOK_DOMAIN="${WORKER_DOMAIN}/telegram/webhook"
+
+# Bypass apps: name_suffix|path|secret_name
+BYPASS_CONFIGS=(
+  "telegram-webhook|/telegram/webhook|TELEGRAM_WEBHOOK_SECRET"
+  "slack-events|/slack/events|SLACK_SIGNING_SECRET"
+)
 
 # --- Fetch current Access apps ---
 
@@ -90,106 +96,105 @@ fi
 MAIN_APP_ID=$(echo "$MAIN_APP" | jq -r '.id')
 echo "  Main app: $MAIN_APP_NAME (ID: $MAIN_APP_ID)"
 
-# Check webhook bypass app
-WEBHOOK_APP=$(echo "$APPS_RESPONSE" | jq -r --arg name "$WEBHOOK_APP_NAME" '.result[] | select(.name == $name)')
-WEBHOOK_APP_ID=""
-if [[ -n "$WEBHOOK_APP" ]]; then
-  WEBHOOK_APP_ID=$(echo "$WEBHOOK_APP" | jq -r '.id')
-  echo "  Webhook bypass app: $WEBHOOK_APP_NAME (ID: $WEBHOOK_APP_ID)"
-else
-  echo "  Webhook bypass app: not found"
-fi
+# --- Check wrangler secrets (once, shared across all bypass checks) ---
 
-# --- Determine desired state ---
-
-# Check if TELEGRAM_WEBHOOK_SECRET is configured as a wrangler secret
-WANTS_WEBHOOK=false
 echo ""
 echo "▶ Checking wrangler secrets..."
 WRANGLER_TMP=$(mktemp).json
 $STRIP "$OVERLAY_DIR/wrangler.jsonc" > "$WRANGLER_TMP"
 SECRET_LIST=$(npx wrangler secret list --config "$WRANGLER_TMP" 2>/dev/null || echo "[]")
 rm -f "$WRANGLER_TMP"
-if echo "$SECRET_LIST" | jq -e '.[] | select(.name == "TELEGRAM_WEBHOOK_SECRET")' &>/dev/null; then
-  WANTS_WEBHOOK=true
-fi
 
-echo ""
-echo "  Desired webhook bypass: $WANTS_WEBHOOK"
+# --- Reconcile each bypass app ---
 
-# --- Reconcile ---
+for config in "${BYPASS_CONFIGS[@]}"; do
+  IFS='|' read -r SUFFIX URL_PATH SECRET_NAME <<< "$config"
+  APP_NAME="${WORKER_NAME}-${SUFFIX}"
+  APP_DOMAIN="${WORKER_DOMAIN}${URL_PATH}"
 
-if [[ "$WANTS_WEBHOOK" == "true" && -z "$WEBHOOK_APP_ID" ]]; then
-  # Create webhook bypass app
-  echo ""
-  echo "▶ Creating webhook bypass app: $WEBHOOK_APP_NAME"
-  echo "  Domain: $WEBHOOK_DOMAIN"
-
-  CREATE_RESPONSE=$(curl -s -X POST "$API_BASE" \
-    -H "Authorization: Bearer $CF_ACCESS_API_TOKEN" \
-    -H "Content-Type: application/json" \
-    -d "{
-      \"name\": \"${WEBHOOK_APP_NAME}\",
-      \"type\": \"self_hosted\",
-      \"domain\": \"${WEBHOOK_DOMAIN}\",
-      \"session_duration\": \"24h\"
-    }")
-
-  if [[ "$(echo "$CREATE_RESPONSE" | jq -r '.success')" != "true" ]]; then
-    echo "Error: Failed to create webhook bypass app:" >&2
-    echo "$CREATE_RESPONSE" | jq . >&2
-    exit 1
-  fi
-
-  WEBHOOK_APP_ID=$(echo "$CREATE_RESPONSE" | jq -r '.result.id')
-  echo "  Created (ID: $WEBHOOK_APP_ID)"
-
-  # Add bypass policy
-  echo "▶ Creating bypass policy: Bypass Everyone"
-  POLICY_RESPONSE=$(curl -s -X POST \
-    "$API_BASE/$WEBHOOK_APP_ID/policies" \
-    -H "Authorization: Bearer $CF_ACCESS_API_TOKEN" \
-    -H "Content-Type: application/json" \
-    -d '{
-      "name": "Bypass Everyone",
-      "decision": "bypass",
-      "include": [{"everyone": {}}]
-    }')
-
-  if [[ "$(echo "$POLICY_RESPONSE" | jq -r '.success')" != "true" ]]; then
-    echo "Error: Failed to create bypass policy:" >&2
-    echo "$POLICY_RESPONSE" | jq . >&2
-    exit 1
-  fi
-
-  echo "  Policy created"
-  echo ""
-  echo "✅ Webhook bypass app created: $WEBHOOK_DOMAIN"
-
-elif [[ "$WANTS_WEBHOOK" == "false" && -n "$WEBHOOK_APP_ID" ]]; then
-  # Delete webhook bypass app (no longer needed)
-  echo ""
-  echo "▶ Deleting webhook bypass app: $WEBHOOK_APP_NAME (no longer needed)"
-
-  DELETE_RESPONSE=$(curl -s -X DELETE \
-    "$API_BASE/$WEBHOOK_APP_ID" \
-    -H "Authorization: Bearer $CF_ACCESS_API_TOKEN")
-
-  if [[ "$(echo "$DELETE_RESPONSE" | jq -r '.success')" == "true" ]]; then
-    echo "  Deleted"
+  # Check current state
+  EXISTING_APP=$(echo "$APPS_RESPONSE" | jq -r --arg name "$APP_NAME" '.result[] | select(.name == $name)')
+  EXISTING_ID=""
+  if [[ -n "$EXISTING_APP" ]]; then
+    EXISTING_ID=$(echo "$EXISTING_APP" | jq -r '.id')
+    echo "  Bypass app: $APP_NAME (ID: $EXISTING_ID)"
   else
-    echo "  ⚠ Failed to delete:" >&2
-    echo "$DELETE_RESPONSE" | jq . >&2
+    echo "  Bypass app: $APP_NAME — not found"
   fi
 
-  echo ""
-  echo "✅ Webhook bypass app removed"
+  # Determine if bypass is needed
+  WANTS=false
+  if echo "$SECRET_LIST" | jq -e --arg name "$SECRET_NAME" '.[] | select(.name == $name)' &>/dev/null; then
+    WANTS=true
+  fi
+  echo "  Desired: $WANTS"
 
-else
-  echo ""
-  if [[ "$WANTS_WEBHOOK" == "true" ]]; then
-    echo "✅ Webhook bypass app already exists — no changes needed"
+  if [[ "$WANTS" == "true" && -z "$EXISTING_ID" ]]; then
+    echo ""
+    echo "▶ Creating bypass app: $APP_NAME"
+    echo "  Domain: $APP_DOMAIN"
+
+    CREATE_RESPONSE=$(curl -s -X POST "$API_BASE" \
+      -H "Authorization: Bearer $CF_ACCESS_API_TOKEN" \
+      -H "Content-Type: application/json" \
+      -d "{
+        \"name\": \"${APP_NAME}\",
+        \"type\": \"self_hosted\",
+        \"domain\": \"${APP_DOMAIN}\",
+        \"session_duration\": \"24h\"
+      }")
+
+    if [[ "$(echo "$CREATE_RESPONSE" | jq -r '.success')" != "true" ]]; then
+      echo "Error: Failed to create bypass app $APP_NAME:" >&2
+      echo "$CREATE_RESPONSE" | jq . >&2
+      exit 1
+    fi
+
+    NEW_ID=$(echo "$CREATE_RESPONSE" | jq -r '.result.id')
+    echo "  Created (ID: $NEW_ID)"
+
+    echo "▶ Creating bypass policy: Bypass Everyone"
+    POLICY_RESPONSE=$(curl -s -X POST \
+      "$API_BASE/$NEW_ID/policies" \
+      -H "Authorization: Bearer $CF_ACCESS_API_TOKEN" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "name": "Bypass Everyone",
+        "decision": "bypass",
+        "include": [{"everyone": {}}]
+      }')
+
+    if [[ "$(echo "$POLICY_RESPONSE" | jq -r '.success')" != "true" ]]; then
+      echo "Error: Failed to create bypass policy for $APP_NAME:" >&2
+      echo "$POLICY_RESPONSE" | jq . >&2
+      exit 1
+    fi
+
+    echo "  Policy created"
+    echo "✅ Bypass app created: $APP_DOMAIN"
+
+  elif [[ "$WANTS" == "false" && -n "$EXISTING_ID" ]]; then
+    echo ""
+    echo "▶ Deleting bypass app: $APP_NAME (no longer needed)"
+
+    DELETE_RESPONSE=$(curl -s -X DELETE \
+      "$API_BASE/$EXISTING_ID" \
+      -H "Authorization: Bearer $CF_ACCESS_API_TOKEN")
+
+    if [[ "$(echo "$DELETE_RESPONSE" | jq -r '.success')" == "true" ]]; then
+      echo "  Deleted"
+    else
+      echo "  ⚠ Failed to delete:" >&2
+      echo "$DELETE_RESPONSE" | jq . >&2
+    fi
+    echo "✅ Bypass app removed: $APP_NAME"
+
   else
-    echo "✅ No webhook bypass needed — no changes needed"
+    if [[ "$WANTS" == "true" ]]; then
+      echo "  ✅ Already exists — no changes needed"
+    else
+      echo "  ✅ Not needed — no changes needed"
+    fi
   fi
-fi
+  echo ""
+done
