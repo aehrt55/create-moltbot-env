@@ -30,7 +30,7 @@ The script will:
 - If no `queues` block exists, auto-inject a default config (with `max_retries: 10`, `max_batch_size: 5`, `max_batch_timeout: 5`)
 - Attempt to create each queue via `npx wrangler queues create`; existing queues are detected by error response (avoids `wrangler queues list` which lacks `--json` output)
 
-If wrangler's OAuth session has expired locally, it will prompt the user to re-authenticate. If the user prefers to use an API token instead, they can set `CLOUDFLARE_API_TOKEN` in the environment before running.
+If wrangler's OAuth session has expired locally, it will prompt the user to re-authenticate.
 
 ## Phase 3 — Verify Overlay wrangler.jsonc Config
 

@@ -100,14 +100,18 @@ echo "  Main app: $MAIN_APP_NAME (ID: $MAIN_APP_ID)"
 
 echo ""
 echo "▶ Checking wrangler secrets..."
-WRANGLER_TMP=$(mktemp).json
+WRANGLER_TMP=$(mktemp)
+trap 'rm -f "$WRANGLER_TMP"' EXIT
 $STRIP "$OVERLAY_DIR/wrangler.jsonc" > "$WRANGLER_TMP"
 SECRET_LIST=$(npx wrangler secret list --config "$WRANGLER_TMP" 2>/dev/null) || {
   echo "Error: Failed to list wrangler secrets" >&2
-  rm -f "$WRANGLER_TMP"
   exit 1
 }
-rm -f "$WRANGLER_TMP"
+if ! echo "$SECRET_LIST" | jq empty 2>/dev/null; then
+  echo "Error: wrangler secret list returned non-JSON output:" >&2
+  echo "$SECRET_LIST" >&2
+  exit 1
+fi
 
 # --- Reconcile each bypass app ---
 
@@ -169,8 +173,9 @@ for config in "${BYPASS_CONFIGS[@]}"; do
       }')
 
     # Design Decision: On policy failure, the just-created app is left orphaned (blocks webhook
-    # with Access but has no bypass policy). Re-running detects "Already exists" and skips.
-    # A future improvement should rollback (delete the app) or retry policy creation.
+    # with Access but has no bypass policy). Re-running will NOT fix this — it sees the app
+    # exists and skips it. Manual deletion from the CF dashboard is required before re-running.
+    # A future improvement should rollback (delete the app) on policy failure.
     if [[ "$(echo "$POLICY_RESPONSE" | jq -r '.success')" != "true" ]]; then
       echo "Error: Failed to create bypass policy for $APP_NAME:" >&2
       echo "$POLICY_RESPONSE" | jq . >&2
@@ -191,6 +196,11 @@ for config in "${BYPASS_CONFIGS[@]}"; do
     if [[ "$(echo "$DELETE_RESPONSE" | jq -r '.success')" == "true" ]]; then
       echo "  Deleted"
       echo "✅ Bypass app removed: $APP_NAME"
+    # Design Decision: Bypass deletion failure is non-fatal (warning only, no exit 1).
+    # Rationale: sync-access runs as a pre-deploy step; failing hard here would block
+    # deployment of unrelated changes. The warning is visible in logs, and re-running
+    # the script will retry the deletion. If the CF API is persistently down, the
+    # operator can delete the bypass app manually from the dashboard.
     else
       echo "  ⚠ Failed to delete $APP_NAME:" >&2
       echo "$DELETE_RESPONSE" | jq . >&2
