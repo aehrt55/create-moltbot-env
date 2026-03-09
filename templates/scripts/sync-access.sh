@@ -102,12 +102,11 @@ echo ""
 echo "▶ Checking wrangler secrets..."
 WRANGLER_TMP=$(mktemp).json
 $STRIP "$OVERLAY_DIR/wrangler.jsonc" > "$WRANGLER_TMP"
-if ! SECRET_LIST=$(npx wrangler secret list --config "$WRANGLER_TMP" 2>&1); then
-  echo "Error: Failed to list wrangler secrets:" >&2
-  echo "$SECRET_LIST" >&2
+SECRET_LIST=$(npx wrangler secret list --config "$WRANGLER_TMP" 2>/dev/null) || {
+  echo "Error: Failed to list wrangler secrets" >&2
   rm -f "$WRANGLER_TMP"
   exit 1
-fi
+}
 rm -f "$WRANGLER_TMP"
 
 # --- Reconcile each bypass app ---
@@ -197,12 +196,10 @@ for config in "${BYPASS_CONFIGS[@]}"; do
       echo "$DELETE_RESPONSE" | jq . >&2
     fi
 
+  elif [[ "$WANTS" == "true" ]]; then
+    echo "  ✅ Already exists — no changes needed"
   else
-    if [[ "$WANTS" == "true" ]]; then
-      echo "  ✅ Already exists — no changes needed"
-    else
-      echo "  ✅ Not needed — no changes needed"
-    fi
+    echo "  ✅ Not needed — no changes needed"
   fi
   echo ""
 done
