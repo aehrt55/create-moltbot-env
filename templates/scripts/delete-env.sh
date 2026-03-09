@@ -108,7 +108,12 @@ fi
 
 API_BASE="https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/access/apps"
 MAIN_APP_NAME="${WORKER_NAME} - Cloudflare Workers"
-WEBHOOK_APP_NAME="${WORKER_NAME}-telegram-webhook"
+
+# Bypass apps: name_suffix|path|secret_name (path and secret_name unused for deletion)
+BYPASS_CONFIGS=(
+  "telegram-webhook|/telegram/webhook|TELEGRAM_WEBHOOK_SECRET"
+  "slack-events|/slack/events|SLACK_SIGNING_SECRET"
+)
 
 echo "▶ Fetching Access apps..."
 APPS_RESPONSE=$(curl -s "$API_BASE" -H "Authorization: Bearer $CF_ACCESS_API_TOKEN")
@@ -117,22 +122,27 @@ if [[ "$(echo "$APPS_RESPONSE" | jq -r '.success')" != "true" ]]; then
   echo "  ⚠ Failed to list Access apps:" >&2
   echo "$APPS_RESPONSE" | jq . >&2
 else
-  # Delete webhook bypass app
-  echo "▶ Deleting webhook bypass app: $WEBHOOK_APP_NAME"
-  WEBHOOK_APP_ID=$(echo "$APPS_RESPONSE" | jq -r --arg name "$WEBHOOK_APP_NAME" '.result[] | select(.name == $name) | .id')
+  # Delete bypass apps
+  for config in "${BYPASS_CONFIGS[@]}"; do
+    IFS='|' read -r SUFFIX _ _ <<< "$config"
+    APP_NAME="${WORKER_NAME}-${SUFFIX}"
 
-  if [[ -n "$WEBHOOK_APP_ID" ]]; then
-    DELETE_RESPONSE=$(curl -s -X DELETE "$API_BASE/$WEBHOOK_APP_ID" \
-      -H "Authorization: Bearer $CF_ACCESS_API_TOKEN")
-    if [[ "$(echo "$DELETE_RESPONSE" | jq -r '.success')" == "true" ]]; then
-      echo "  Deleted (ID: $WEBHOOK_APP_ID)"
+    echo "▶ Deleting bypass app: $APP_NAME"
+    APP_ID=$(echo "$APPS_RESPONSE" | jq -r --arg name "$APP_NAME" '.result[] | select(.name == $name) | .id')
+
+    if [[ -n "$APP_ID" ]]; then
+      DELETE_RESPONSE=$(curl -s -X DELETE "$API_BASE/$APP_ID" \
+        -H "Authorization: Bearer $CF_ACCESS_API_TOKEN")
+      if [[ "$(echo "$DELETE_RESPONSE" | jq -r '.success')" == "true" ]]; then
+        echo "  Deleted (ID: $APP_ID)"
+      else
+        echo "  ⚠ Failed to delete:" >&2
+        echo "$DELETE_RESPONSE" | jq . >&2
+      fi
     else
-      echo "  ⚠ Failed to delete:" >&2
-      echo "$DELETE_RESPONSE" | jq . >&2
+      echo "  Not found, skipping"
     fi
-  else
-    echo "  Not found, skipping"
-  fi
+  done
 
   # Delete main Access app
   echo "▶ Deleting main Access app: $MAIN_APP_NAME"

@@ -65,7 +65,7 @@ Edit `overlays/<env>/version.txt` with the target moltbot-app git ref (SHA, tag,
 - `scripts/create-env.sh` — bootstraps new environment (R2 bucket, CF Access app, overlay directory, AGE key pair)
 - `scripts/delete-env.sh` — tears down environment (Worker, container app, CF Access apps, R2 bucket, overlay, .sops.yaml rule)
 - `scripts/ensure-queue.sh` — ensures Cloudflare Queues exist for overlay config; idempotent, safe to run on every deploy
-- `scripts/sync-access.sh` — reconciles Cloudflare Access Applications: checks current state, creates/deletes webhook bypass app as needed
+- `scripts/sync-access.sh` — reconciles Cloudflare Access Applications: checks current state, creates/deletes webhook bypass apps as needed (telegram, slack)
 - `scripts/setup-env-age-key.sh` — generates or regenerates AGE key pair for an environment, updates `.sops.yaml` and re-encrypts secrets
 
 ## External Dependencies
