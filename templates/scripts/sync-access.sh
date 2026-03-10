@@ -100,7 +100,7 @@ echo "  Main app: $MAIN_APP_NAME (ID: $MAIN_APP_ID)"
 
 echo ""
 echo "▶ Checking wrangler secrets..."
-WRANGLER_TMP=$(mktemp)
+WRANGLER_TMP=$(mktemp).json
 trap 'rm -f "$WRANGLER_TMP"' EXIT
 $STRIP "$OVERLAY_DIR/wrangler.jsonc" > "$WRANGLER_TMP"
 SECRET_LIST=$(npx wrangler secret list --config "$WRANGLER_TMP" 2>/dev/null) || {
