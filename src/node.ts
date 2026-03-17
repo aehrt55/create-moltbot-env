@@ -68,8 +68,8 @@ export async function node(argv: string[]): Promise<void> {
     console.error(chalk.red(`Error: WORKER_URL not set in overlays/${envName}/wrangler.jsonc`));
     process.exit(1);
   }
-  if (!vars.NODE_BYPASS_ROUTE) {
-    console.error(chalk.red(`Error: NODE_BYPASS_ROUTE not set in overlays/${envName}/wrangler.jsonc`));
+  if (!vars.NODE_ROUTE) {
+    console.error(chalk.red(`Error: NODE_ROUTE not set in overlays/${envName}/wrangler.jsonc`));
     process.exit(1);
   }
 
@@ -92,21 +92,33 @@ export async function node(argv: string[]): Promise<void> {
 
   // 6. Compute relay URL
   const workerHost = new URL(vars.WORKER_URL).host;
-  const relayUrl = `wss://${workerHost}${vars.NODE_BYPASS_ROUTE}`;
+  const relayUrl = `wss://${workerHost}${vars.NODE_ROUTE}`;
+
+  // 7. Build remote headers (CF Access Service Token from env vars)
+  const remoteHeaders: Record<string, string> = {};
+  const clientId = process.env.CF_ACCESS_CLIENT_ID;
+  const clientSecret = process.env.CF_ACCESS_CLIENT_SECRET;
+  if (clientId && clientSecret) {
+    remoteHeaders["CF-Access-Client-Id"] = clientId;
+    remoteHeaders["CF-Access-Client-Secret"] = clientSecret;
+  } else {
+    console.log(chalk.yellow("Warning: CF_ACCESS_CLIENT_ID / CF_ACCESS_CLIENT_SECRET not set — relay will connect without Service Token"));
+  }
 
   console.log();
   console.log(chalk.bold(`Node: ${displayName}`));
   console.log(chalk.dim(`Relay: localhost:${port} → ${relayUrl}`));
   console.log();
 
-  // 7. Start ws-relay
+  // 8. Start ws-relay
   const relay = startRelay({
     remoteUrl: relayUrl,
     token: gatewayToken,
     localPort: port,
+    remoteHeaders,
   });
 
-  // 8. Spawn openclaw node run
+  // 9. Spawn openclaw node run
   const child = spawn(
     "openclaw",
     ["node", "run", "--host", "127.0.0.1", "--port", String(port), "--display-name", displayName],
@@ -128,7 +140,7 @@ export async function node(argv: string[]): Promise<void> {
     process.exit(code ?? 0);
   });
 
-  // 9. Graceful shutdown on SIGINT/SIGTERM
+  // 10. Graceful shutdown on SIGINT/SIGTERM
   function handleSignal(signal: string) {
     console.log(chalk.dim(`\nReceived ${signal}, shutting down...`));
     child.kill("SIGTERM");

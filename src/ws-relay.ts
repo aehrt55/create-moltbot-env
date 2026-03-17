@@ -1,14 +1,21 @@
-import { WebSocketServer, WebSocket } from "ws";
+import { WebSocketServer, WebSocket, type RawData } from "ws";
 
 export interface RelayOptions {
   remoteUrl: string;
   token: string;
   localPort: number;
   localHost?: string;
+  /** Extra HTTP headers for the remote WebSocket upgrade request (e.g. CF Access Service Token) */
+  remoteHeaders?: Record<string, string>;
   /** Heartbeat interval in ms (default: 30000) */
   heartbeatInterval?: number;
   /** Max reconnect attempts before giving up (default: Infinity) */
   maxReconnects?: number;
+}
+
+interface BufferedMessage {
+  data: RawData;
+  isBinary: boolean;
 }
 
 interface RelayState {
@@ -19,6 +26,8 @@ interface RelayState {
   reconnectTimer: ReturnType<typeof setTimeout> | null;
   reconnectAttempt: number;
   shuttingDown: boolean;
+  /** Messages from local buffered while remote is connecting */
+  pendingMessages: BufferedMessage[];
 }
 
 const MAX_BACKOFF_MS = 30_000;
@@ -53,6 +62,7 @@ export function startRelay(opts: RelayOptions): { shutdown: () => void } {
     token,
     localPort,
     localHost = "127.0.0.1",
+    remoteHeaders = {},
     heartbeatInterval = 30_000,
     maxReconnects = Infinity,
   } = opts;
@@ -67,6 +77,7 @@ export function startRelay(opts: RelayOptions): { shutdown: () => void } {
     reconnectTimer: null,
     reconnectAttempt: 0,
     shuttingDown: false,
+    pendingMessages: [],
   };
 
   log(`listening on ${localHost}:${localPort}`);
@@ -98,7 +109,8 @@ export function startRelay(opts: RelayOptions): { shutdown: () => void } {
   function connectRemote() {
     if (state.shuttingDown) return;
 
-    const remote = new WebSocket(remoteWithToken);
+    log("connecting to remote...");
+    const remote = new WebSocket(remoteWithToken, { headers: remoteHeaders });
     state.remote = remote;
 
     remote.on("open", () => {
@@ -106,7 +118,16 @@ export function startRelay(opts: RelayOptions): { shutdown: () => void } {
       state.reconnectAttempt = 0;
       startHeartbeat(remote);
 
-      // If local is already connected, wire up message relay
+      // Flush buffered messages from local
+      if (state.pendingMessages.length > 0) {
+        log(`flushing ${state.pendingMessages.length} buffered message(s)`);
+        for (const msg of state.pendingMessages) {
+          remote.send(msg.data, { binary: msg.isBinary });
+        }
+        state.pendingMessages = [];
+      }
+
+      // If local is already connected, wire up live relay
       if (state.local && state.local.readyState === WebSocket.OPEN) {
         wireRelay(state.local, remote);
       }
@@ -117,10 +138,12 @@ export function startRelay(opts: RelayOptions): { shutdown: () => void } {
       clearHeartbeat();
       state.remote = null;
 
-      // Don't reconnect on normal close (1000) or if shutting down
-      if (state.shuttingDown || code === 1000) return;
+      if (state.shuttingDown) return;
 
-      scheduleReconnect();
+      // Reconnect if local is still alive (regardless of close code)
+      if (state.local && state.local.readyState === WebSocket.OPEN) {
+        scheduleReconnect();
+      }
     });
 
     remote.on("error", (err) => {
@@ -179,35 +202,46 @@ export function startRelay(opts: RelayOptions): { shutdown: () => void } {
       state.local.close(1000, "replaced by new connection");
     }
     state.local = local;
+    state.pendingMessages = [];
 
     local.on("close", (code) => {
       log(`local closed (code: ${code})`);
       state.local = null;
+      state.pendingMessages = [];
+      // Close remote when local disconnects (clean up server-side resources)
+      if (state.remote && state.remote.readyState === WebSocket.OPEN) {
+        state.remote.close(1000, "local disconnected");
+      }
     });
 
     local.on("error", (err) => {
       logError(`local error: ${err.message}`);
     });
 
-    // If remote is already connected, wire up immediately
+    // If remote is already connected and open, wire up immediately
     if (state.remote && state.remote.readyState === WebSocket.OPEN) {
       wireRelay(local, state.remote);
-    }
+    } else {
+      // Buffer local messages until remote is ready
+      local.on("message", (data, isBinary) => {
+        const preview = isBinary
+          ? `[binary ${Buffer.isBuffer(data) ? data.length : "?"}B]`
+          : String(data).slice(0, 200);
+        log(`local→buffer: ${preview}`);
+        state.pendingMessages.push({ data, isBinary });
+      });
 
-    // If no remote connection, start one
-    if (!state.remote || state.remote.readyState === WebSocket.CLOSED) {
-      connectRemote();
+      // Lazy: connect remote when first local client arrives
+      if (!state.remote || state.remote.readyState >= WebSocket.CLOSING) {
+        connectRemote();
+      }
+      // else: remote is CONNECTING, wait for open event
     }
   });
 
-  // Design Decision: Eager remote connection — connect immediately so the relay is
-  // "warm" when openclaw node starts, avoiding ~200-500ms TLS+upgrade latency on
-  // first message. Tradeoff: wastes a WebSocket if openclaw fails to start, and may
-  // wake the container before the node is ready. For the `make node` interactive use
-  // case this is acceptable. If resource usage becomes a concern, switch to lazy mode:
-  // remove this call and only connectRemote() inside wss.on("connection"), plus guard
-  // reconnect to only fire when state.local is alive.
-  connectRemote();
+  // Lazy connection: don't connect to remote until a local client arrives.
+  // This avoids the container gateway timing out an idle WebSocket (which would
+  // close with 1000 before openclaw has a chance to send the connect challenge).
 
   function shutdown() {
     if (state.shuttingDown) return;

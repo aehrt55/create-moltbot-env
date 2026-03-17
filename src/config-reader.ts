@@ -24,7 +24,7 @@ interface CredentialSource {
 
 export interface OverlayVars {
   WORKER_URL: string;
-  NODE_BYPASS_ROUTE?: string;
+  NODE_ROUTE?: string;
   [key: string]: string | undefined;
 }
 

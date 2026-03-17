@@ -36,10 +36,13 @@ ensure-queue:
 	@bash $(ROOT)/scripts/ensure-queue.sh $(ENV_NAME)
 
 # Start paired node: relay + openclaw node via create-moltbot-env CLI
+# Loads CF Access Service Token from Keychain for authentication.
 # Override node name: make node NODE_NAME=my-custom-name
 NODE_NAME ?= $(ENV_NAME)-$(shell hostname -s)
 node:
-	@npx @marxbiotech/create-moltbot-env node --env $(ENV_NAME) --node-name "$(NODE_NAME)"
+	@CF_ACCESS_CLIENT_ID=$$(security find-generic-password -a "cf-node-service-token" -s "cf-node-client-id" -w 2>/dev/null) \
+	CF_ACCESS_CLIENT_SECRET=$$(security find-generic-password -a "cf-node-service-token" -s "cf-node-client-secret" -w 2>/dev/null) \
+	npx @marxbiotech/create-moltbot-env node --env $(ENV_NAME) --node-name "$(NODE_NAME)"
 
 # Edit secrets via SOPS (requires SOPS_AGE_KEY env var)
 edit-secrets:
