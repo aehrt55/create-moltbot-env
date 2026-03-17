@@ -93,7 +93,7 @@ moltbot-env/
 │   ├── delete-env.sh              # Reverse of create-env
 │   ├── ensure-queue.sh            # Ensure Cloudflare Queues exist for overlay config
 │   ├── setup-env-age-key.sh       # Generate/regenerate AGE key pair for environment
-│   ├── sync-access.sh             # Reconcile CF Access webhook bypass apps
+│   ├── sync-access.sh             # Reconcile CF Access apps (bypass + service_auth), auto-manages NODE_ACCESS_AUD
 │   └── jsonc-strip.js             # JSONC → JSON converter
 ├── docs/
 │   ├── cf-api-token.md            # How to create CF Access API token

@@ -9,9 +9,9 @@ moltbot-env is a GitOps environment configuration repository for [moltbot-app](h
 ## Architecture
 
 **Overlay pattern with Make orchestration:**
-- `Makefile` — shared make targets (deploy, secret, wrangler, merged-config, edit-secrets, push-secrets, sync-access, ensure-queue); derives `ROOT` via `realpath` on the symlink
+- `Makefile` — shared make targets (deploy, secret, wrangler, merged-config, edit-secrets, push-secrets, sync-access, ensure-queue, node); derives `ROOT` via `realpath` on the symlink
 - `overlays/<env>/Makefile` — symlink to `../../Makefile`; `$(CURDIR)` resolves to the overlay directory so `ENV_NAME` is auto-derived
-- `overlays/<env>/wrangler.jsonc` — environment-specific Wrangler config overrides (JSONC format with comments)
+- `overlays/<env>/wrangler.jsonc` — environment-specific Wrangler config overrides (JSONC format with comments). Key vars include `NODE_ROUTE` (the node route path for openclaw connections), `NODE_SERVICE_TOKEN_ID` (CF Access Service Token ID protecting the node route), and `NODE_ACCESS_AUD` (CF Access Application AUD tag for Worker-level JWT verification, auto-managed by `sync-access.sh`)
 - `overlays/<env>/version.txt` — pinned moltbot-app git ref to deploy (SHA, tag, or branch)
 - `overlays/<env>/secrets.json` — SOPS-encrypted secrets (AGE encryption), committed to git
 - `.sops.yaml` — path-based creation rules mapping each overlay to its AGE recipients (env key + manager key(s))
@@ -35,6 +35,7 @@ Scripts read credential sources from `.moltbot-env.json` → `credentials` secti
 |---|---|---|
 | `SOPS_AGE_KEY` | `credentials.sopsAgeKey` | `edit-secrets`, `push-secrets`, `deploy`, `delete-env`, `setup-env-age-key` |
 | `CF_ACCESS_API_TOKEN` | `credentials.cfAccessApiToken` | `sync-access`, `create-env`, `delete-env` |
+| `CF_ACCESS_CLIENT_ID` + `CF_ACCESS_CLIENT_SECRET` | N/A (loaded from macOS Keychain: account=`cf-node-service-token`, services=`cf-node-client-id` / `cf-node-client-secret`) | `node` |
 
 Scripts auto-load credentials from the configured source. You can also export them manually or pass as environment variables.
 
@@ -48,10 +49,12 @@ make secret KEY=ANTHROPIC_API_KEY        # Set a Wrangler secret interactively
 make wrangler CMD='secret list'          # Run arbitrary wrangler command
 make wrangler CMD='tail'                 # Stream live logs
 make merged-config APP_DIR=/path/to/app  # Inspect final merged config (needs local app repo)
-make sync-access                         # Sync CF Access apps (webhook bypass, requires CF_ACCESS_API_TOKEN)
+make sync-access                         # Sync CF Access apps (webhook bypass + node service_auth, auto-manages NODE_ACCESS_AUD)
 make ensure-queue                        # Ensure Cloudflare Queues exist for overlay config
 make edit-secrets                        # Edit secrets via SOPS (requires SOPS_AGE_KEY)
 make push-secrets                        # Decrypt and bulk-push secrets to Cloudflare
+make node                                # Start paired node (relay + openclaw node via create-moltbot-env CLI)
+make node NODE_NAME=custom               # Override node display name (default: <env>-<hostname>)
 ```
 
 ## Updating App Version
@@ -65,7 +68,7 @@ Edit `overlays/<env>/version.txt` with the target moltbot-app git ref (SHA, tag,
 - `scripts/create-env.sh` — bootstraps new environment (R2 bucket, CF Access app, overlay directory, AGE key pair)
 - `scripts/delete-env.sh` — tears down environment (Worker, container app, CF Access apps, R2 bucket, overlay, .sops.yaml rule)
 - `scripts/ensure-queue.sh` — ensures Cloudflare Queues exist for overlay config; idempotent, safe to run on every deploy
-- `scripts/sync-access.sh` — reconciles Cloudflare Access Applications: checks current state, creates/deletes webhook bypass apps as needed (telegram, slack)
+- `scripts/sync-access.sh` — reconciles Cloudflare Access Applications: webhook bypass apps and service_auth app for the node route (if `NODE_ROUTE` is configured). Automatically manages `NODE_ACCESS_AUD` in overlay `wrangler.jsonc` (creates on new app, backfills if missing, removes on delete)
 - `scripts/setup-env-age-key.sh` — generates or regenerates AGE key pair for an environment, updates `.sops.yaml` and re-encrypts secrets
 
 ## External Dependencies

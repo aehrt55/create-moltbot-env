@@ -70,7 +70,34 @@ fi
 # Unset wrangler-recognized token vars so wrangler uses its own login session
 unset CF_API_TOKEN CLOUDFLARE_API_TOKEN
 
+WRANGLER_JSONC="$OVERLAY_DIR/wrangler.jsonc"
 STRIP="node $SCRIPT_DIR/jsonc-strip.js"
+
+# Update or insert NODE_ACCESS_AUD in overlay wrangler.jsonc.
+# Uses sed line operations to safely handle JSONC (preserves comments).
+update_node_access_aud() {
+  local aud="$1"
+  if grep -q '"NODE_ACCESS_AUD"' "$WRANGLER_JSONC"; then
+    # Update existing value
+    sed -i '' "s|\"NODE_ACCESS_AUD\":.*|\"NODE_ACCESS_AUD\": \"${aud}\",|" "$WRANGLER_JSONC"
+    echo "  Updated NODE_ACCESS_AUD in wrangler.jsonc"
+  elif grep -q '"NODE_SERVICE_TOKEN_ID"' "$WRANGLER_JSONC"; then
+    # Insert after NODE_SERVICE_TOKEN_ID line
+    sed -i '' "/\"NODE_SERVICE_TOKEN_ID\"/a\\
+\\    \"NODE_ACCESS_AUD\": \"${aud}\",
+" "$WRANGLER_JSONC"
+    echo "  Added NODE_ACCESS_AUD to wrangler.jsonc"
+  else
+    echo "  ⚠ Could not find NODE_SERVICE_TOKEN_ID in wrangler.jsonc — add NODE_ACCESS_AUD manually" >&2
+  fi
+}
+
+remove_node_access_aud() {
+  if grep -q '"NODE_ACCESS_AUD"' "$WRANGLER_JSONC"; then
+    sed -i '' '/"NODE_ACCESS_AUD"/d' "$WRANGLER_JSONC"
+    echo "  Removed NODE_ACCESS_AUD from wrangler.jsonc"
+  fi
+}
 OVERLAY_JSON=$($STRIP "$OVERLAY_DIR/wrangler.jsonc")
 WORKER_NAME=$(echo "$OVERLAY_JSON" | jq -r '.name')
 WORKER_DOMAIN="${WORKER_NAME}.${WORKERS_SUBDOMAIN}.workers.dev"
@@ -218,6 +245,17 @@ for config in "${ACCESS_CONFIGS[@]}"; do
     fi
 
     echo "  Policy created"
+
+    # For service_auth apps, save the AUD tag to overlay config for Worker-level JWT verification
+    if [[ "$POLICY_TYPE" == "service_auth" ]]; then
+      NEW_AUD=$(echo "$CREATE_RESPONSE" | jq -r '.result.aud // empty')
+      if [[ -n "$NEW_AUD" ]]; then
+        update_node_access_aud "$NEW_AUD"
+      else
+        echo "  ⚠ Could not extract AUD from create response — add NODE_ACCESS_AUD manually" >&2
+      fi
+    fi
+
     echo "✅ Access app created: $APP_DOMAIN ($POLICY_TYPE)"
 
   elif [[ "$WANTS" == "false" && -n "$EXISTING_ID" ]]; then
@@ -230,6 +268,9 @@ for config in "${ACCESS_CONFIGS[@]}"; do
 
     if [[ "$(echo "$DELETE_RESPONSE" | jq -r '.success')" == "true" ]]; then
       echo "  Deleted"
+      if [[ "$POLICY_TYPE" == "service_auth" ]]; then
+        remove_node_access_aud
+      fi
       echo "✅ Access app removed: $APP_NAME"
     # Design Decision: Deletion failure is non-fatal (warning only, no exit 1).
     else
@@ -239,7 +280,20 @@ for config in "${ACCESS_CONFIGS[@]}"; do
 
   else
     if [[ "$WANTS" == "true" ]]; then
-      echo "  ✅ Already exists — no changes needed"
+      # For service_auth apps, ensure NODE_ACCESS_AUD is in overlay config
+      if [[ "$POLICY_TYPE" == "service_auth" ]] && ! grep -q '"NODE_ACCESS_AUD"' "$WRANGLER_JSONC"; then
+        echo "  NODE_ACCESS_AUD missing from wrangler.jsonc — fetching from API..."
+        APP_DETAIL=$(curl -s "$API_BASE/$EXISTING_ID" \
+          -H "Authorization: Bearer $CF_ACCESS_API_TOKEN")
+        EXISTING_AUD=$(echo "$APP_DETAIL" | jq -r '.result.aud // empty')
+        if [[ -n "$EXISTING_AUD" ]]; then
+          update_node_access_aud "$EXISTING_AUD"
+        else
+          echo "  ⚠ Could not fetch AUD — add NODE_ACCESS_AUD manually" >&2
+        fi
+      else
+        echo "  ✅ Already exists — no changes needed"
+      fi
     else
       echo "  ✅ Not needed — no changes needed"
     fi
