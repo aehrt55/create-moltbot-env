@@ -5,9 +5,9 @@ set -euo pipefail
 #
 # For each overlay, ensures:
 # 1. A main Access app exists (domain-level protection)
-# 2. Webhook bypass apps exist for configured channels:
-#    - /telegram/webhook if TELEGRAM_WEBHOOK_SECRET is in secrets
-#    - /slack/events if SLACK_SIGNING_SECRET is in secrets
+# 2. Per-route Access apps exist based on deployed secrets:
+#    - bypass apps for webhook routes (telegram, slack)
+#    - service_auth app for the node route (if NODE_ROUTE is configured)
 #
 # Usage: sync-access.sh <env-name>
 
@@ -31,7 +31,14 @@ load_credential() {
   if [[ "$source" == "keychain" ]] && command -v security &>/dev/null; then
     local account=$(jq -r --arg k "$key" '.credentials[$k].keychainAccount' "$config")
     local service=$(jq -r --arg k "$key" '.credentials[$k].keychainService' "$config")
-    security find-generic-password -a "$account" -s "$service" -w 2>/dev/null || true
+    local value
+    if value=$(security find-generic-password -a "$account" -s "$service" -w 2>&1); then
+      echo "$value"
+    else
+      echo "Warning: Keychain lookup failed for $key (account=$account, service=$service)" >&2
+    fi
+  elif [[ "$source" != "null" && -n "$source" ]]; then
+    echo "Warning: unsupported credential source '$source' for $key" >&2
   fi
 }
 
@@ -63,16 +70,52 @@ fi
 # Unset wrangler-recognized token vars so wrangler uses its own login session
 unset CF_API_TOKEN CLOUDFLARE_API_TOKEN
 
+WRANGLER_JSONC="$OVERLAY_DIR/wrangler.jsonc"
 STRIP="node $SCRIPT_DIR/jsonc-strip.js"
-WORKER_NAME=$($STRIP "$OVERLAY_DIR/wrangler.jsonc" | jq -r '.name')
+
+# Update or insert NODE_ACCESS_AUD in overlay wrangler.jsonc.
+# Uses sed line operations to safely handle JSONC (preserves comments).
+update_node_access_aud() {
+  local aud="$1"
+  if grep -q '"NODE_ACCESS_AUD"' "$WRANGLER_JSONC"; then
+    # Update existing value
+    sed -i '' "s|\"NODE_ACCESS_AUD\":.*|\"NODE_ACCESS_AUD\": \"${aud}\",|" "$WRANGLER_JSONC"
+    echo "  Updated NODE_ACCESS_AUD in wrangler.jsonc"
+  elif grep -q '"NODE_SERVICE_TOKEN_ID"' "$WRANGLER_JSONC"; then
+    # Insert after NODE_SERVICE_TOKEN_ID line
+    sed -i '' "/\"NODE_SERVICE_TOKEN_ID\"/a\\
+\\    \"NODE_ACCESS_AUD\": \"${aud}\",
+" "$WRANGLER_JSONC"
+    echo "  Added NODE_ACCESS_AUD to wrangler.jsonc"
+  else
+    echo "  ⚠ Could not find NODE_SERVICE_TOKEN_ID in wrangler.jsonc — add NODE_ACCESS_AUD manually" >&2
+  fi
+}
+
+remove_node_access_aud() {
+  if grep -q '"NODE_ACCESS_AUD"' "$WRANGLER_JSONC"; then
+    sed -i '' '/"NODE_ACCESS_AUD"/d' "$WRANGLER_JSONC"
+    echo "  Removed NODE_ACCESS_AUD from wrangler.jsonc"
+  fi
+}
+OVERLAY_JSON=$($STRIP "$OVERLAY_DIR/wrangler.jsonc")
+WORKER_NAME=$(echo "$OVERLAY_JSON" | jq -r '.name')
 WORKER_DOMAIN="${WORKER_NAME}.${WORKERS_SUBDOMAIN}.workers.dev"
 MAIN_APP_NAME="${WORKER_NAME} - Cloudflare Workers"
 
-# Bypass apps: name_suffix|path|secret_name
-BYPASS_CONFIGS=(
-  "telegram-webhook|/telegram/webhook|TELEGRAM_WEBHOOK_SECRET"
-  "slack-events|/slack/events|SLACK_SIGNING_SECRET"
+# Access apps: name_suffix|path|secret_name|policy_type
+# policy_type: "bypass" (default) or "service_auth"
+# Design Decision: NODE_SERVICE_TOKEN_ID is a script-global rather than a per-config field (5th pipe field).
+# Currently only one service_auth entry exists; if a second is added, refactor to embed token ID per entry.
+NODE_ROUTE=$(echo "$OVERLAY_JSON" | jq -r '.vars.NODE_ROUTE // empty')
+NODE_SERVICE_TOKEN_ID=$(echo "$OVERLAY_JSON" | jq -r '.vars.NODE_SERVICE_TOKEN_ID // empty')
+ACCESS_CONFIGS=(
+  "telegram-webhook|/telegram/webhook|TELEGRAM_WEBHOOK_SECRET|bypass"
+  "slack-events|/slack/events|SLACK_SIGNING_SECRET|bypass"
 )
+if [[ -n "$NODE_ROUTE" ]]; then
+  ACCESS_CONFIGS+=("node|${NODE_ROUTE}|MOLTBOT_GATEWAY_TOKEN|service_auth")
+fi
 
 # --- Fetch current Access apps ---
 
@@ -96,7 +139,7 @@ fi
 MAIN_APP_ID=$(echo "$MAIN_APP" | jq -r '.id')
 echo "  Main app: $MAIN_APP_NAME (ID: $MAIN_APP_ID)"
 
-# --- Check wrangler secrets (once, shared across all bypass checks) ---
+# --- Check wrangler secrets (once, shared across all access checks) ---
 
 echo ""
 echo "▶ Checking wrangler secrets..."
@@ -113,10 +156,15 @@ if ! echo "$SECRET_LIST" | jq empty 2>/dev/null; then
   exit 1
 fi
 
-# --- Reconcile each bypass app ---
+# --- Reconcile each access app ---
 
-for config in "${BYPASS_CONFIGS[@]}"; do
-  IFS='|' read -r SUFFIX URL_PATH SECRET_NAME <<< "$config"
+for config in "${ACCESS_CONFIGS[@]}"; do
+  IFS='|' read -r SUFFIX URL_PATH SECRET_NAME POLICY_TYPE <<< "$config"
+  POLICY_TYPE="${POLICY_TYPE:-bypass}"
+  case "$POLICY_TYPE" in
+    bypass|service_auth) ;;
+    *) echo "Error: unknown policy_type '$POLICY_TYPE' in ACCESS_CONFIGS entry: $config" >&2; exit 1 ;;
+  esac
   APP_NAME="${WORKER_NAME}-${SUFFIX}"
   APP_DOMAIN="${WORKER_DOMAIN}${URL_PATH}"
 
@@ -125,21 +173,21 @@ for config in "${BYPASS_CONFIGS[@]}"; do
   EXISTING_ID=""
   if [[ -n "$EXISTING_APP" ]]; then
     EXISTING_ID=$(echo "$EXISTING_APP" | jq -r '.id')
-    echo "  Bypass app: $APP_NAME (ID: $EXISTING_ID)"
+    echo "  Access app: $APP_NAME (ID: $EXISTING_ID)"
   else
-    echo "  Bypass app: $APP_NAME — not found"
+    echo "  Access app: $APP_NAME — not found"
   fi
 
-  # Determine if bypass is needed
+  # Determine if app is needed
   WANTS=false
   if echo "$SECRET_LIST" | jq -e --arg name "$SECRET_NAME" '.[] | select(.name == $name)' &>/dev/null; then
     WANTS=true
   fi
-  echo "  Desired: $WANTS"
+  echo "  Desired: $WANTS (policy: $POLICY_TYPE)"
 
   if [[ "$WANTS" == "true" && -z "$EXISTING_ID" ]]; then
     echo ""
-    echo "▶ Creating bypass app: $APP_NAME"
+    echo "▶ Creating access app: $APP_NAME"
     echo "  Domain: $APP_DOMAIN"
 
     CREATE_RESPONSE=$(curl -s -X POST "$API_BASE" \
@@ -153,7 +201,7 @@ for config in "${BYPASS_CONFIGS[@]}"; do
       }")
 
     if [[ "$(echo "$CREATE_RESPONSE" | jq -r '.success')" != "true" ]]; then
-      echo "Error: Failed to create bypass app $APP_NAME:" >&2
+      echo "Error: Failed to create access app $APP_NAME:" >&2
       echo "$CREATE_RESPONSE" | jq . >&2
       exit 1
     fi
@@ -161,33 +209,58 @@ for config in "${BYPASS_CONFIGS[@]}"; do
     NEW_ID=$(echo "$CREATE_RESPONSE" | jq -r '.result.id')
     echo "  Created (ID: $NEW_ID)"
 
-    echo "▶ Creating bypass policy: Bypass Everyone"
+    # Build policy payload based on type
+    if [[ "$POLICY_TYPE" == "service_auth" ]]; then
+      # Use specific token if NODE_SERVICE_TOKEN_ID is set, otherwise allow any valid service token
+      if [[ -n "$NODE_SERVICE_TOKEN_ID" ]]; then
+        echo "▶ Creating policy: Allow Service Token ($NODE_SERVICE_TOKEN_ID)"
+        POLICY_DATA="{\"name\":\"Allow Service Token\",\"decision\":\"non_identity\",\"include\":[{\"service_token\":{\"token_id\":\"${NODE_SERVICE_TOKEN_ID}\"}}]}"
+      else
+        echo "▶ Creating policy: Allow Any Service Token"
+        POLICY_DATA='{"name":"Allow Service Tokens","decision":"non_identity","include":[{"any_valid_service_token":{}}]}'
+      fi
+    else
+      echo "▶ Creating policy: Bypass Everyone"
+      POLICY_DATA='{"name":"Bypass Everyone","decision":"bypass","include":[{"everyone":{}}]}'
+    fi
+
     POLICY_RESPONSE=$(curl -s -X POST \
       "$API_BASE/$NEW_ID/policies" \
       -H "Authorization: Bearer $CF_ACCESS_API_TOKEN" \
       -H "Content-Type: application/json" \
-      -d '{
-        "name": "Bypass Everyone",
-        "decision": "bypass",
-        "include": [{"everyone": {}}]
-      }')
+      -d "$POLICY_DATA")
 
-    # Design Decision: On policy failure, the just-created app is left orphaned (blocks webhook
-    # with Access but has no bypass policy). Re-running will NOT fix this — it sees the app
-    # exists and skips it. Manual deletion from the CF dashboard is required before re-running.
-    # A future improvement should rollback (delete the app) on policy failure.
     if [[ "$(echo "$POLICY_RESPONSE" | jq -r '.success')" != "true" ]]; then
-      echo "Error: Failed to create bypass policy for $APP_NAME:" >&2
+      echo "Error: Failed to create policy for $APP_NAME:" >&2
       echo "$POLICY_RESPONSE" | jq . >&2
+      echo "▶ Rolling back: deleting orphaned app $APP_NAME (ID: $NEW_ID)..." >&2
+      ROLLBACK=$(curl -s -X DELETE "$API_BASE/$NEW_ID" \
+        -H "Authorization: Bearer $CF_ACCESS_API_TOKEN")
+      if [[ "$(echo "$ROLLBACK" | jq -r '.success')" == "true" ]]; then
+        echo "  Rolled back successfully. Re-run to retry." >&2
+      else
+        echo "  ⚠ Rollback failed. Manually delete app $NEW_ID from CF dashboard before re-running." >&2
+      fi
       exit 1
     fi
 
     echo "  Policy created"
-    echo "✅ Bypass app created: $APP_DOMAIN"
+
+    # For service_auth apps, save the AUD tag to overlay config for Worker-level JWT verification
+    if [[ "$POLICY_TYPE" == "service_auth" ]]; then
+      NEW_AUD=$(echo "$CREATE_RESPONSE" | jq -r '.result.aud // empty')
+      if [[ -n "$NEW_AUD" ]]; then
+        update_node_access_aud "$NEW_AUD"
+      else
+        echo "  ⚠ Could not extract AUD from create response — add NODE_ACCESS_AUD manually" >&2
+      fi
+    fi
+
+    echo "✅ Access app created: $APP_DOMAIN ($POLICY_TYPE)"
 
   elif [[ "$WANTS" == "false" && -n "$EXISTING_ID" ]]; then
     echo ""
-    echo "▶ Deleting bypass app: $APP_NAME (no longer needed)"
+    echo "▶ Deleting access app: $APP_NAME (no longer needed)"
 
     DELETE_RESPONSE=$(curl -s -X DELETE \
       "$API_BASE/$EXISTING_ID" \
@@ -195,21 +268,35 @@ for config in "${BYPASS_CONFIGS[@]}"; do
 
     if [[ "$(echo "$DELETE_RESPONSE" | jq -r '.success')" == "true" ]]; then
       echo "  Deleted"
-      echo "✅ Bypass app removed: $APP_NAME"
-    # Design Decision: Bypass deletion failure is non-fatal (warning only, no exit 1).
-    # Rationale: sync-access runs as a pre-deploy step; failing hard here would block
-    # deployment of unrelated changes. The warning is visible in logs, and re-running
-    # the script will retry the deletion. If the CF API is persistently down, the
-    # operator can delete the bypass app manually from the dashboard.
+      if [[ "$POLICY_TYPE" == "service_auth" ]]; then
+        remove_node_access_aud
+      fi
+      echo "✅ Access app removed: $APP_NAME"
+    # Design Decision: Deletion failure is non-fatal (warning only, no exit 1).
     else
       echo "  ⚠ Failed to delete $APP_NAME:" >&2
       echo "$DELETE_RESPONSE" | jq . >&2
     fi
 
-  elif [[ "$WANTS" == "true" ]]; then
-    echo "  ✅ Already exists — no changes needed"
   else
-    echo "  ✅ Not needed — no changes needed"
+    if [[ "$WANTS" == "true" ]]; then
+      # For service_auth apps, ensure NODE_ACCESS_AUD is in overlay config
+      if [[ "$POLICY_TYPE" == "service_auth" ]] && ! grep -q '"NODE_ACCESS_AUD"' "$WRANGLER_JSONC"; then
+        echo "  NODE_ACCESS_AUD missing from wrangler.jsonc — fetching from API..."
+        APP_DETAIL=$(curl -s "$API_BASE/$EXISTING_ID" \
+          -H "Authorization: Bearer $CF_ACCESS_API_TOKEN")
+        EXISTING_AUD=$(echo "$APP_DETAIL" | jq -r '.result.aud // empty')
+        if [[ -n "$EXISTING_AUD" ]]; then
+          update_node_access_aud "$EXISTING_AUD"
+        else
+          echo "  ⚠ Could not fetch AUD — add NODE_ACCESS_AUD manually" >&2
+        fi
+      else
+        echo "  ✅ Already exists — no changes needed"
+      fi
+    else
+      echo "  ✅ Not needed — no changes needed"
+    fi
   fi
   echo ""
 done

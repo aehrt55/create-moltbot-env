@@ -4,7 +4,7 @@ OVERLAY_DIR := $(CURDIR)
 ENV_NAME := $(notdir $(OVERLAY_DIR))
 STRIP_JSONC := node $(ROOT)/scripts/jsonc-strip.js
 
-.PHONY: deploy secret wrangler merged-config edit-secrets push-secrets sync-access ensure-queue
+.PHONY: deploy secret wrangler merged-config edit-secrets push-secrets sync-access ensure-queue node
 
 # Full deploy: clone app repo → npm ci → merge configs → wrangler deploy
 deploy:
@@ -34,6 +34,20 @@ sync-access:
 # Ensure Cloudflare Queues exist for overlay config
 ensure-queue:
 	@bash $(ROOT)/scripts/ensure-queue.sh $(ENV_NAME)
+
+# Start paired node: relay + openclaw node via create-moltbot-env CLI
+# Loads CF Access Service Token from Keychain for authentication.
+# Override node name: make node NODE_NAME=my-custom-name
+NODE_NAME ?= $(ENV_NAME)-$(shell hostname -s)
+node:
+	@set -e; \
+	CF_ACCESS_CLIENT_ID=$$(security find-generic-password -a "cf-node-service-token" -s "cf-node-client-id" -w 2>/dev/null); \
+	CF_ACCESS_CLIENT_SECRET=$$(security find-generic-password -a "cf-node-service-token" -s "cf-node-client-secret" -w 2>/dev/null); \
+	test -n "$$CF_ACCESS_CLIENT_ID" || { echo "Error: CF Access Client ID not found in Keychain (account=cf-node-service-token, service=cf-node-client-id)" >&2; exit 1; }; \
+	test -n "$$CF_ACCESS_CLIENT_SECRET" || { echo "Error: CF Access Client Secret not found in Keychain (account=cf-node-service-token, service=cf-node-client-secret)" >&2; exit 1; }; \
+	CF_ACCESS_CLIENT_ID="$$CF_ACCESS_CLIENT_ID" \
+	CF_ACCESS_CLIENT_SECRET="$$CF_ACCESS_CLIENT_SECRET" \
+	npx @marxbiotech/create-moltbot-env node --env $(ENV_NAME) --node-name "$(NODE_NAME)"
 
 # Edit secrets via SOPS (requires SOPS_AGE_KEY env var)
 edit-secrets:
